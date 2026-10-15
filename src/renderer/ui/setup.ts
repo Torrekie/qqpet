@@ -13,7 +13,7 @@ import { button, div, typeable } from './dom'
 import { setFaceClick } from './face'
 import { readopt, setHidden } from './menu'
 import { pageZoom } from './viewport'
-import { checkUpdate } from './update'
+import { checkUpdate, ipcError, packReady } from './update'
 import { windowView } from './window-view'
 
 type Option = { label: string; title?: string } & (
@@ -101,6 +101,25 @@ function importSave(): void {
       void window.qqpet.importSave().catch(() => windowView({ title: '导入存档', msg: '这不是有效的QQ宠物存档~' }))
     },
   })
+}
+
+async function importPack(): Promise<void> {
+  try {
+    const v = await window.qqpet.packs!.importPack()
+    if (v) packReady(v)
+  } catch (e) {
+    windowView({ title: '导入内容包', msg: `无法导入：${ipcError(e)}` })
+  }
+}
+
+function resetPacks(): void {
+  void window.qqpet.packs!.info().then(({ content, shell }) =>
+    windowView({
+      title: '恢复内置内容',
+      msg: content === shell ? `当前就是程序自带的 v${shell} 内容~` : `将删除已安装的 v${content} 内容包，回到程序自带的 v${shell} 内容并重启，确定吗？`,
+      ok: content === shell ? undefined : () => void window.qqpet.packs!.reset().then(() => window.qqpet.packs!.relaunch()),
+    }),
+  )
 }
 
 function rebornAsOther(): void {
@@ -253,6 +272,17 @@ const TABS: { label: string; options: Option[] }[] = [
       { type: 'button', label: '导入存档（支持原版 config.json）', title: '用存档文件替换当前宠物，导入后自动重启', run: importSave },
     ],
   },
+  ...(window.qqpet.packs
+    ? [
+        {
+          label: '内容包',
+          options: [
+            { type: 'button' as const, label: '导入内容包…', title: '安装 .qqpetpack 内容包（新素材），不用重装程序；导入后重启生效', run: importPack },
+            { type: 'button' as const, label: '恢复内置内容', title: '删除已导入或下载的内容包，回到程序自带的素材，重启后生效', run: resetPacks },
+          ],
+        },
+      ]
+    : []),
   {
     label: '工具',
     options: [

@@ -165,6 +165,18 @@ jobs:
           pattern: qqpet-*
           path: artifacts
           merge-multiple: true
+      # Content packs (#28): the full core pack and the resources/pet changes since the previous tag, plus packs.json.
+      # The installers above still carry the full content; only this job needs the LFS files.
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: Content packs
+        run: |
+          git lfs install --local
+          git lfs pull --include "resources/pet/**"
+          prev=$(git describe --tags --abbrev=0 "$GITHUB_REF_NAME^" 2>/dev/null || true)
+          node --experimental-strip-types scripts/pack-content.mjs --version "${GITHUB_REF_NAME#v}" --full ${prev:+--base "$prev"} \
+            --out artifacts --url-prefix "https://github.com/${GITHUB_REPOSITORY}/releases/download/${GITHUB_REF_NAME}/"
       # Commit subjects since the previous tag, grouped by gitmoji; docs, CI and refactors are left out.
       - name: Release notes
         run: |

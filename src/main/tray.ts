@@ -1,16 +1,15 @@
 import { app, Menu, nativeImage, screen, Tray, type MenuItemConstructorOptions, type NativeImage } from 'electron'
 import { readFileSync } from 'node:fs'
-import { join } from 'node:path'
 import type { TrayClick, TrayMenuItem, TrayState } from '../shared/ipc'
 import type { PetInfo, SaveData } from '../shared/save'
 import { TRAY_STATES, trayTip } from '../shared/tray'
-import { resourcesRoot } from './protocol'
+import { resourceFile } from './content'
 
 const FRAME_MS = 300
 
 /** createFromPath also loads a `@2x` sibling for HiDPI screens; a buffer is the file alone. */
 function icon(sex: string, file: string, hd: boolean): NativeImage {
-  const path = join(resourcesRoot, 'pet/img_res/Tray', sex, file)
+  const path = resourceFile(`pet/img_res/Tray/${sex}/${file}`) ?? ''
   return hd ? nativeImage.createFromPath(path) : nativeImage.createFromBuffer(readFileSync(path))
 }
 

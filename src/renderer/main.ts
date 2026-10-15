@@ -194,6 +194,28 @@ function updateCursor(p: DesktopCursor): void {
   window.qqpet.setClickThrough(!hit)
 }
 window.qqpet.onCursor(updateCursor)
+
+// Linux: the window takes the mouse only over the pet and the [data-hit] panels (#45). A hit root may be a
+// zero-sized anchor with overflowing children (the pet toolbar), so the children count too.
+const setHitShape = window.qqpet.setHitShape
+if (setHitShape) {
+  let sent = ''
+  setInterval(() => {
+    const rects: { x: number; y: number; width: number; height: number }[] = []
+    if (dragging) rects.push({ x: 0, y: 0, width: innerWidth, height: innerHeight })
+    else if (!save.settings.hidden) {
+      for (const el of document.querySelectorAll('#pet, [data-hit], [data-hit] *')) {
+        if (!el.checkVisibility({ visibilityProperty: true }) || getComputedStyle(el).pointerEvents === 'none') continue
+        const r = el.getBoundingClientRect()
+        if (r.width > 0 && r.height > 0) rects.push({ x: r.x, y: r.y, width: r.width, height: r.height })
+      }
+    }
+    const key = JSON.stringify(rects)
+    if (key === sent) return
+    sent = key
+    setHitShape(rects)
+  }, 50)
+}
 window.addEventListener('qqpet-hidden-change', () => {
   if (save.settings.hidden) petInput.cancel()
   updateCursor(cursor)

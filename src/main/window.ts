@@ -39,7 +39,9 @@ export function createPetWindow(): BrowserWindow {
   // Full-screen apps hide the pet: macOS keeps it off full-screen spaces, and
   // Linux window managers stack a focused full-screen window above it.
   win.setVisibleOnAllWorkspaces(true)
-  win.setIgnoreMouseEvents(true)
+  // Linux starts with an empty input shape instead; the page sets the real one (#45).
+  if (process.platform === 'linux') win.setShape([{ x: 0, y: 0, width: 0, height: 0 }])
+  else win.setIgnoreMouseEvents(true)
   // On macOS, dock.hide() turns the process into a UI element, which hides
   // windows that are already visible.
   win.once('ready-to-show', () => {

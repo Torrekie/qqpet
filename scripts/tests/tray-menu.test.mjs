@@ -30,7 +30,7 @@ function fixture(platform) {
     },
     Menu: { buildFromTemplate: items => items },
     nativeImage: { createFromBuffer: () => ({}) },
-    readFileSync: () => new Uint8Array(), join: (...parts) => parts.join('/'), resourcesRoot: '/resources',
+    readFileSync: () => new Uint8Array(), resourceFile: (path) => '/resources/' + path,
     screen: { getCursorScreenPoint: () => ({ x: -1200, y: -1400 }) },
     app: { quit: () => clicks.push('quit') },
   })

@@ -11,6 +11,8 @@ import { petsocPath } from './src/main/nocase'
 export default defineConfig({
   main: {
     build: { rollupOptions: { input: resolve('src/main/index.ts') } },
+    // content.ts compares packs against the shell's version (#28).
+    plugins: [appVersion()],
   },
   preload: {
     // Sandboxed preload scripts must be CommonJS.

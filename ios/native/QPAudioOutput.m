@@ -31,11 +31,14 @@ static BOOL QPAudioNumber(id value) {
 @implementation QPAudioBuffer
 @end
 
+@class QPAudioCallbackBox;
+
 @interface QPAudioContext : NSObject
 @property(nonatomic, copy) NSString *page;
 @property(nonatomic, copy) NSString *key;
 @property(nonatomic) uint64_t identifier;
 @property(nonatomic) AudioQueueRef queue;
+@property(nonatomic, strong) QPAudioCallbackBox *callbackBox;
 @property(nonatomic, strong) NSMutableArray<QPAudioBuffer *> *buffers;
 @property(nonatomic, copy) void (^reply)(NSDictionary *event);
 @property(nonatomic) BOOL requestedRunning;
@@ -48,6 +51,16 @@ static BOOL QPAudioNumber(id value) {
 @property(nonatomic) uint64_t lastSource;
 @end
 @implementation QPAudioContext
+@end
+
+// The context retains this userData box until synchronous AudioQueueDispose
+// returns. The box never owns either object that controls/disposes AudioQueue.
+@interface QPAudioCallbackBox : NSObject
+@property(nonatomic, weak) QPAudioOutput *owner;
+@property(nonatomic, weak) QPAudioContext *context;
+@property(nonatomic, strong) dispatch_queue_t controlQueue;
+@end
+@implementation QPAudioCallbackBox
 @end
 
 // AVAudioSession is shared by every host in this process. A running queue owns
@@ -74,7 +87,6 @@ static NSString *QPAudioReleaseSession(QPAudioContext *context) {
 
 @interface QPAudioOutput ()
 @property(nonatomic, strong) dispatch_queue_t queue;
-@property(nonatomic, strong) dispatch_queue_t callbackQueue;
 @property(nonatomic, strong) NSMutableDictionary<NSString *, QPAudioContext *> *contexts;
 @property(nonatomic, strong) NSMutableArray *observers;
 @property(nonatomic, copy) NSDictionary *snapshot;
@@ -88,16 +100,28 @@ static NSString *QPAudioReleaseSession(QPAudioContext *context) {
 @property(nonatomic) uint64_t submittedFrames;
 @property(nonatomic) uint64_t nonSilentBuffers;
 @property(nonatomic, copy) NSString *lastError;
+- (void)completedBuffer:(AudioQueueBufferRef)buffer queue:(AudioQueueRef)queue context:(QPAudioContext *)context;
 @end
+
+static void QPAudioOutputCallback(void *userData, AudioQueueRef queue, AudioQueueBufferRef buffer) {
+    @autoreleasepool {
+        QPAudioCallbackBox *box = (__bridge QPAudioCallbackBox *)userData;
+        // Do not retain the output owner on AudioQueue's internal callback
+        // thread: its final release could synchronously dispose the queue.
+        // Only the box is retained until the control block checks its owners.
+        dispatch_async(box.controlQueue, ^{
+            QPAudioOutput *owner = box.owner;
+            QPAudioContext *context = box.context;
+            if (owner && context) [owner completedBuffer:buffer queue:queue context:context];
+        });
+    }
+}
 
 @implementation QPAudioOutput
 
 - (instancetype)init {
     if (!(self = [super init])) return nil;
     _queue = dispatch_queue_create("net.ankio.qqpet.audio-output", DISPATCH_QUEUE_SERIAL);
-    // AudioQueueDispose synchronously drains its callback queue internally.
-    // Never use or target that queue for control operations or disposal.
-    _callbackQueue = dispatch_queue_create("net.ankio.qqpet.audio-callback", DISPATCH_QUEUE_SERIAL);
     dispatch_queue_set_specific(_queue, QPAudioQueueKey, (__bridge void *)self, NULL);
     _contexts = [NSMutableDictionary dictionary];
     _observers = [NSMutableArray array];
@@ -127,6 +151,7 @@ static NSString *QPAudioReleaseSession(QPAudioContext *context) {
             AudioQueueRef queue = context.queue;
             context.queue = NULL;
             if (queue) AudioQueueDispose(queue, true);
+            context.callbackBox = nil;
             QPAudioReleaseSession(context);
         }
     };
@@ -234,11 +259,14 @@ static NSString *QPAudioReleaseSession(QPAudioContext *context) {
     context.closed = YES;
     context.running = NO;
     context.requestedRunning = NO;
-    // Mark the generation dead before disposal: callbacks forwarded from the
-    // independent callback queue must not report successful ends after teardown.
+    // Mark the generation dead before disposal: callbacks forwarded from an
+    // internal AudioQueue thread must not report successful ends after teardown.
     AudioQueueRef queue = context.queue;
     context.queue = NULL;
     if (queue) AudioQueueDispose(queue, true);
+    // AudioQueue guarantees no further callbacks after Dispose returns when it
+    // is called outside a callback. Keep userData alive through that boundary.
+    context.callbackBox = nil;
     [context.buffers removeAllObjects];
     NSString *deactivationError = QPAudioReleaseSession(context);
     if (deactivationError) [self recordError:deactivationError];
@@ -270,22 +298,19 @@ static NSString *QPAudioReleaseSession(QPAudioContext *context) {
     format.mBytesPerFrame = 8;
     format.mChannelsPerFrame = 2;
     format.mBitsPerChannel = 32;
-    __weak QPAudioOutput *weakSelf = self;
-    __weak QPAudioContext *weakContext = context;
-    dispatch_queue_t controlQueue = self.queue;
+    QPAudioCallbackBox *box = [QPAudioCallbackBox new];
+    box.owner = self;
+    box.context = context;
+    box.controlQueue = self.queue;
+    context.callbackBox = box;
     AudioQueueRef queue = NULL;
-    OSStatus result = AudioQueueNewOutputWithDispatchQueue(&queue, &format, 0, self.callbackQueue, ^(AudioQueueRef output, AudioQueueBufferRef buffer) {
-        // This callback must never wait for controlQueue. Promote weak owners
-        // only in the forwarded block, keeping even a final owner release and
-        // its synchronous disposal off AudioQueue's own callback queue.
-        dispatch_async(controlQueue, ^{
-            QPAudioOutput *owner = weakSelf;
-            QPAudioContext *liveContext = weakContext;
-            if (owner && liveContext) [owner completedBuffer:buffer queue:output context:liveContext];
-        });
-    });
+    // iOS 15's dispatch-queue AudioQueue implementation can destroy its client
+    // on the callback queue and synchronously wait on that same queue. The
+    // classic API's NULL run loop uses AudioQueue's own callback threads.
+    OSStatus result = AudioQueueNewOutput(&format, QPAudioOutputCallback, (__bridge void *)box, NULL, NULL, 0, &queue);
     if (result != noErr || !queue) {
         if (queue) AudioQueueDispose(queue, true);
+        context.callbackBox = nil;
         return [NSString stringWithFormat:@"AudioQueueNewOutput: %d", (int)result];
     }
     context.queue = queue;

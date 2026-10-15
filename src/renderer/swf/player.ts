@@ -77,6 +77,8 @@ function createRuffleElement(parent: HTMLElement): { el: RufflePlayerElement; cl
 const players = new Set<SwfPlayer>()
 const LOAD_MS = 30_000
 const CALLBACK_MS = 10_000
+const RECOVERY_WINDOW_MS = 30_000
+const RECOVERY_LIMIT = 3
 let hostPaused = Boolean(window.__qqpetHostPaused)
 
 /** Display lifecycle is independent from the user's paused-growth setting. */
@@ -168,15 +170,33 @@ export class SwfPlayer {
   private panicObserver: MutationObserver | null = null
   private reportedPanic = false
   private canvas: HTMLCanvasElement | null = null
+  private readonly recoverContext: boolean
+  private contextCleanup = (): void => {}
+  private lastLoad: { url: string; base: string; options: Record<string, unknown> } | null = null
+  private callbackArgs = new Map<string, unknown[]>()
+  private movie = 0
+  private recovering = false
+  private recovery = 0
+  private recoveryTimes: number[] = []
+  private resumeWaiters = new Set<() => void>()
 
   /** The SWF's ExternalInterface calls go to the globals of the window that owns `parent`. */
-  constructor(parent: HTMLElement) {
+  constructor(parent: HTMLElement, { recoverContext = false }: { recoverContext?: boolean } = {}) {
+    this.recoverContext = recoverContext
     const created = createRuffleElement(parent)
     this.el = created.el
     this.globalCleanup = created.cleanup
     try {
       players.add(this)
       if (this.el.shadowRoot) {
+        if (recoverContext) {
+          const root = this.el.shadowRoot
+          const lost = (event: Event): void => this.contextLost(event)
+          // Capture before Ruffle's target listener, which leaves small instance
+          // counts running on a lost context. suspend() alone still renders.
+          root.addEventListener('webglcontextlost', lost, true)
+          this.contextCleanup = () => root.removeEventListener('webglcontextlost', lost, true)
+        }
         this.panicObserver = new MutationObserver((records) => {
           this.publishPanic()
           releaseRemovedCanvases(records)
@@ -208,6 +228,84 @@ export class SwfPlayer {
     for (const cancel of [...this.pending]) cancel(new Error(message))
   }
 
+  private failMovie(url: string, error: unknown): void {
+    if (this.destroyed) return
+    const message = error instanceof Error ? error.message : String(error)
+    this.cancelPending(message)
+    this.destroy()
+    window.dispatchEvent(new CustomEvent('qqpet-swf-error', { detail: { url, message } }))
+  }
+
+  private contextLost(event: Event): void {
+    const canvas = event.target as HTMLCanvasElement | null
+    const frame = this.el.ownerDocument.defaultView?.frameElement
+    if (this.destroyed || !this.el.isConnected || (frame && !frame.isConnected) || !canvas?.isConnected ||
+      canvas !== this.el.shadowRoot?.querySelector('#container > canvas')) return
+    if (this.loading) {
+      // An incomplete builder cannot be reused or recovered. Removing the
+      // element synchronously destroys its Rust instance and cancels the load.
+      this.failMovie(this.el.dataset.swf ?? '', new Error('WebGL context was lost while loading'))
+      return
+    }
+    if (!this.meta || !this.lastLoad || canvas !== this.canvas) return
+    const now = performance.now()
+    this.recoveryTimes = this.recoveryTimes.filter(at => now - at < RECOVERY_WINDOW_MS)
+    if (this.recoveryTimes.length >= RECOVERY_LIMIT) {
+      this.failMovie(this.lastLoad.url, new Error('WebGL context recovery limit exceeded'))
+      return
+    }
+    this.recoveryTimes.push(now)
+    const recovery = ++this.recovery
+    this.recovering = true
+    // This async function reaches ruffle().load() before its first await. Its
+    // pinned implementation destroys the old Rust instance synchronously.
+    void this.restoreMovie(this.lastLoad, recovery)
+  }
+
+  private async waitForResume(): Promise<void> {
+    if (!hostPaused) return
+    await new Promise<void>((resolve, reject) => {
+      const finish = (): void => { this.pending.delete(cancel); this.resumeWaiters.delete(resume) }
+      const resume = (): void => { finish(); resolve() }
+      const cancel = (error: Error): void => { finish(); reject(error) }
+      this.pending.add(cancel)
+      this.resumeWaiters.add(resume)
+    })
+  }
+
+  private async restoreMovie(request: NonNullable<SwfPlayer['lastLoad']>, recovery: number): Promise<void> {
+    const current = (): boolean => !this.destroyed && this.recovery === recovery
+    try {
+      await this.loadMovie(request.url, request.base, request.options, true)
+      const replayed = new Map<string, unknown[]>()
+      while (current()) {
+        const next = [...this.callbackArgs].find(([name, args]) => replayed.get(name) !== args)
+        if (!next) break
+        const [name] = next
+        const host = this.el as unknown as Record<string, unknown>
+        const ready = await this.waitFor(() => {
+          if (typeof host[name] === 'function') return host[name] as (...args: unknown[]) => unknown
+          return hostPaused ? 'paused' : null
+        }, `SWF callback ${name}`, CALLBACK_MS)
+        if (!current()) return
+        if (ready === 'paused') { await this.waitForResume(); continue }
+        const args = this.callbackArgs.get(name)
+        if (!args) continue
+        this.callbacks.add(name)
+        ready.apply(this.el, args)
+        replayed.set(name, args)
+      }
+      if (!current()) return
+      this.recovering = false
+      if (this.stoppedAt !== null) this.el.ruffle().suspend()
+      this.pauseForHost(hostPaused)
+    } catch (error) {
+      if (current()) this.failMovie(request.url, error)
+    } finally {
+      if (this.recovery === recovery) this.recovering = false
+    }
+  }
+
   private publishPanic(): void {
     if (this.destroyed || this.reportedPanic) return
     const panic = readPlayerPanic(this.el)
@@ -225,6 +323,7 @@ export class SwfPlayer {
       const timer = setTimeout(() => cancel(new Error(`${label} timed out`)), milliseconds)
       this.pending.add(cancel)
       operation.then((value) => { finish(); resolve(value) }, cancel)
+      if (this.destroyed) cancel(new Error('SWF player was destroyed'))
     })
   }
 
@@ -259,6 +358,15 @@ export class SwfPlayer {
 
   /** `base` (relative to the page) resolves the SWF's own relative URLs; `options` override Ruffle's config. */
   async load(url: string, base = BASE, options: Record<string, unknown> = {}): Promise<RuffleMetadata> {
+    ++this.recovery
+    this.recovering = false
+    ++this.movie
+    this.lastLoad = null
+    this.callbackArgs.clear()
+    return this.loadMovie(url, base, options)
+  }
+
+  private async loadMovie(url: string, base: string, options: Record<string, unknown>, recovering = false): Promise<RuffleMetadata> {
     if (this.destroyed) throw new Error('SWF player was destroyed')
     // Ruffle does not cancel its async WASM/font builder. Never reuse an in-flight element.
     if (this.loading) {
@@ -294,8 +402,9 @@ export class SwfPlayer {
       this.meta = metadata
       this.canvas = this.el.shadowRoot?.querySelector<HTMLCanvasElement>('#container > canvas') ?? null
       this.startedAt = performance.now()
-      this.stoppedAt = null
+      this.stoppedAt = recovering && this.stoppedAt !== null ? this.startedAt : null
       this.pausedAt = null
+      if (this.recoverContext) this.lastLoad = { url, base, options: { ...options } }
       this.pauseForHost(hostPaused)
       return this.meta
     } catch (error) {
@@ -324,11 +433,16 @@ export class SwfPlayer {
   }
 
   get isPlaying(): boolean {
-    return !hostPaused && this.stoppedAt === null && this.el.ruffle().isPlaying
+    return !this.recovering && !hostPaused && this.stoppedAt === null && this.el.ruffle().isPlaying
+  }
+
+  get isRecovering(): boolean {
+    return this.recovering
   }
 
   stop(): void {
-    this.el.ruffle().suspend()
+    // Recovery may still need the first frame to register its callbacks.
+    if (!this.recovering) this.el.ruffle().suspend()
     this.stoppedAt ??= this.pausedAt ?? performance.now()
   }
 
@@ -345,7 +459,8 @@ export class SwfPlayer {
         if (this.stoppedAt !== null) this.stoppedAt += elapsed
         this.pausedAt = null
       }
-      if (this.stoppedAt === null) this.el.ruffle().resume()
+      if (this.stoppedAt === null || this.recovering) this.el.ruffle().resume()
+      for (const resume of [...this.resumeWaiters]) resume()
     }
   }
 
@@ -369,16 +484,33 @@ export class SwfPlayer {
    */
   async callback(name: string): Promise<(...args: unknown[]) => unknown> {
     if (this.destroyed) throw new Error('SWF player was destroyed')
+    // The pond requests its initial callback before starting the first load.
+    const movie = this.movie || 1
     const host = this.el as unknown as Record<string, unknown>
-    const fn = await this.waitFor(() => typeof host[name] === 'function' ? host[name] as (...args: unknown[]) => unknown : null, `SWF callback ${name}`, CALLBACK_MS)
+    if (!this.recovering)
+      await this.waitFor(() => typeof host[name] === 'function' ? true : null, `SWF callback ${name}`, CALLBACK_MS)
+    if (this.destroyed || movie !== this.movie) throw new Error('SWF callback was replaced or destroyed')
     this.callbacks.add(name)
-    return fn.bind(this.el)
+    return (...args: unknown[]): unknown => {
+      if (this.destroyed || movie !== this.movie) throw new Error('SWF callback was replaced or destroyed')
+      if (this.recoverContext) this.callbackArgs.set(name, args)
+      if (this.recovering) return
+      const fn = host[name]
+      if (typeof fn !== 'function') throw new Error(`SWF callback ${name} is unavailable`)
+      return fn.apply(this.el, args)
+    }
   }
 
   destroy(): void {
     if (this.destroyed) return
     this.publishPanic()
     this.destroyed = true
+    ++this.recovery
+    this.recovering = false
+    this.lastLoad = null
+    this.callbackArgs.clear()
+    this.recoveryTimes = []
+    this.contextCleanup()
     // The document observer can run before the shadow observer. Drain its
     // canvas-removal records before disconnect discards the pending records.
     releaseRemovedCanvases(this.panicObserver?.takeRecords?.())

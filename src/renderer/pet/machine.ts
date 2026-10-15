@@ -60,6 +60,7 @@ export class Machine {
   private tick(): void {
     if (window.__qqpetHostPaused) return
     const f = this.swf.front
+    if (f.isRecovering) return
     const last = f.totalFrames - 1
     const freezeAt = this.poseOpt?.overCurrentFrame
     if (freezeAt && f.currentFrame >= freezeAt && f.isPlaying) f.stop()

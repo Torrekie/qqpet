@@ -10,7 +10,7 @@ el.id = 'talk'
 el.dataset.hit = ''
 el.style.visibility = 'hidden'
 document.body.appendChild(el)
-const player = new SwfPlayer(el)
+const player = new SwfPlayer(el, { recoverContext: true })
 
 let movie = ''
 let actions: (() => void)[] = []

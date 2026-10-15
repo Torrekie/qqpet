@@ -25,13 +25,13 @@ export class PetSwf {
 
   constructor(parent: HTMLElement) {
     this.parent = parent
-    this.front = new SwfPlayer(parent)
+    this.front = new SwfPlayer(parent, { recoverContext: true })
     this.back = this.createBack()
     pinCursor(this.front.el)
   }
 
   private createBack(): SwfPlayer {
-    const back = new SwfPlayer(this.parent)
+    const back = new SwfPlayer(this.parent, { recoverContext: true })
     // Keep the upcoming canvas paintable on older WebKit, without accepting its input.
     back.el.style.opacity = '0'
     back.el.style.pointerEvents = 'none'

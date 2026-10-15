@@ -309,6 +309,224 @@ test('in-flight and panic canvas removals release GPU state, while a reinserted 
   assert.equal(live.canvas.losses, 1)
 })
 
+function contextRecoveryFixture(t, recoverContext = true) {
+  const events = [], calls = [], loads = [], instances = [], timers = new Map(), listeners = new Map()
+  let current = null, instance = null, deferred = false, delayedCallbacks = false, complete = null, now = 0
+  const document = { documentElement: {}, createElement: () => ({}) }
+  const root = {
+    getElementById: () => null, appendChild() {},
+    querySelector: () => current,
+    addEventListener(name, callback, capture) { assert.equal(capture, true); listeners.set(name, callback) },
+    removeEventListener(name, callback) { if (listeners.get(name) === callback) listeners.delete(name) },
+  }
+  function retire() {
+    if (instance) instance.alive = false
+    if (current) current.isConnected = false
+    current = null
+  }
+  function createCanvas() {
+    const canvas = { isConnected: element.isConnected, lost: false, losses: 0,
+      getContext: type => type === 'webgl2' ? gl : null }
+    const gl = { isContextLost: () => canvas.lost,
+      getExtension: () => ({ loseContext() { canvas.lost = true; canvas.losses++ } }) }
+    return canvas
+  }
+  const api = {
+    metadata: null, suspended: false, isPlaying: true,
+    load(options) {
+      retire()
+      loads.push(options)
+      const fresh = { id: instances.length + 1, alive: true, register: null }
+      instances.push(fresh); instance = fresh; current = createCanvas(); this.metadata = null; this.suspended = false
+      const register = () => {
+        element.speak = (...args) => {
+          assert.equal(fresh.alive, true, 'a retired Rust callback must never be invoked')
+          calls.push({ generation: fresh.id, args })
+        }
+      }
+      const finish = () => {
+        if (!element.isConnected) { current = createCanvas(); fresh.alive = true }
+        this.metadata = { width: 100, height: 100, frameRate: 12, numFrames: 24 }
+        if (delayedCallbacks) { fresh.register = register; delayedCallbacks = false }
+        else register()
+      }
+      if (deferred) {
+        deferred = false
+        return new Promise(resolve => { complete = () => { finish(); complete = null; resolve() } })
+      }
+      finish()
+      return Promise.resolve()
+    },
+    suspend() { this.suspended = true },
+    resume() { this.suspended = false; if (instance?.register) { const run = instance.register; instance.register = null; run() } },
+  }
+  const element = {
+    style: {}, dataset: {}, ownerDocument: document, isConnected: true, shadowRoot: root,
+    ruffle: () => api, disconnectedCallback: retire,
+    remove() { this.isConnected = false; retire() },
+  }
+  document.defaultView = { RufflePlayer: { newest: () => ({ createPlayer: () => element }) } }
+  const context = {
+    document, window: { dispatchEvent: event => events.push(event) }, location: { href: 'http://example.test/index.html' },
+    MutationObserver: class { observe() {} disconnect() {} },
+    readPlayerPanic: () => null, isFatalRufflePanic: () => false,
+    CustomEvent: class { constructor(type, { detail }) { this.type = type; this.detail = detail } },
+    URL, performance: { now: () => now },
+    setTimeout(run, ms) { const timer = setTimeout(run, ms); timers.set(timer, ms); return timer },
+    clearTimeout(timer) { timers.delete(timer); clearTimeout(timer) },
+  }
+  const source = readFileSync(new URL('../../src/renderer/swf/player.ts', import.meta.url), 'utf8')
+    .replace(/^import .*$/gm, '').replace(/export (?=class|function)/g, '')
+  runInNewContext(stripTypeScriptTypes(source) + '\nthis.SwfPlayer=SwfPlayer;this.setHostPaused=setHostPaused', context)
+  const player = new context.SwfPlayer({ ownerDocument: document, appendChild() {} }, { recoverContext })
+  t.after(() => { player.destroy(); for (const timer of timers.keys()) clearTimeout(timer) })
+  return {
+    player, element, api, loads, instances, calls, events, timers,
+    get canvas() { return current },
+    lose(canvas = current) { canvas.lost = true; listeners.get('webglcontextlost')?.({ target: canvas }) },
+    deferNext() { deferred = true }, delayCallbacks() { delayedCallbacks = true },
+    complete() { assert.ok(complete); complete() },
+    setPaused: context.setHostPaused, advance: milliseconds => { now += milliseconds },
+    async settle() { for (let i = 0; i < 30; i++) await Promise.resolve() },
+  }
+}
+
+test('opt-in context loss synchronously retires Rust, rebuilds and replays only the latest callback', async t => {
+  const f = contextRecoveryFixture(t)
+  await f.player.load('bubble.swf', './skins/', { parameters: { skin: 2 } })
+  const speak = await f.player.callback('speak')
+  speak('before', [])
+  const oldCanvas = f.canvas
+  f.deferNext()
+  f.lose()
+  assert.equal(f.instances[0].alive, false, 'destroy the old instance in the context-loss event stack')
+  assert.equal(f.loads.length, 2)
+  assert.equal(f.player.isRecovering, true)
+  assert.notEqual(f.canvas, oldCanvas)
+  speak('latest', ['button'])
+  assert.equal(f.calls.length, 1, 'a function obtained before loss must not call the retired instance')
+  f.complete()
+  await f.settle()
+  assert.equal(f.player.isRecovering, false)
+  assert.equal(f.calls.length, 2)
+  assert.deepEqual(f.calls[1], { generation: 2, args: ['latest', ['button']] })
+  assert.equal(f.loads[1].url, f.loads[0].url)
+  assert.equal(f.loads[1].base, f.loads[0].base)
+  assert.equal(f.loads[1].parameters.skin, 2)
+  speak('after', [])
+  assert.equal(f.calls.at(-1).generation, 2)
+
+  f.deferNext()
+  const replacement = f.player.load('different.swf')
+  assert.equal(f.element.speak, undefined, 'normal replacement must delete the replayed generation callback')
+  f.complete()
+  await replacement
+  assert.throws(() => speak('stale', []), /replaced|destroyed/)
+})
+
+test('context recovery defers missing callbacks while host-paused and preserves explicit stop', async t => {
+  const f = contextRecoveryFixture(t)
+  await f.player.load('bubble.swf')
+  ;(await f.player.callback('speak'))('retained', [])
+  f.player.stop()
+  f.setPaused(true)
+  f.delayCallbacks()
+  f.lose()
+  await f.settle()
+  assert.equal(f.player.isRecovering, true)
+  assert.equal(f.api.suspended, true)
+  assert.equal(f.calls.length, 1)
+  assert.equal(f.timers.size, 0, 'waiting for foreground must not consume the callback timeout')
+  f.advance(60_000)
+  f.setPaused(false)
+  await f.settle()
+  assert.equal(f.player.isRecovering, false)
+  assert.equal(f.calls[1].generation, 2)
+  assert.equal(f.api.suspended, true, 'the explicit stop survives initialization and callback replay')
+  assert.equal(f.player.isPlaying, false)
+})
+
+test('retired/removed canvas losses and non-opt-in games never start recovery', async t => {
+  const f = contextRecoveryFixture(t)
+  await f.player.load('first.swf')
+  const old = f.canvas
+  await f.player.load('second.swf')
+  f.lose(old)
+  assert.equal(f.loads.length, 2)
+  const removed = f.canvas
+  f.element.remove()
+  f.lose(removed)
+  assert.equal(f.loads.length, 2)
+
+  const game = contextRecoveryFixture(t, false)
+  await game.player.load('game.swf')
+  game.lose()
+  assert.equal(game.loads.length, 1)
+  assert.equal(game.player.isRecovering, false)
+})
+
+test('loading loss and explicit replacement/destroy cancel recovery without late resurrection', async t => {
+  const partial = contextRecoveryFixture(t)
+  partial.deferNext()
+  const first = partial.player.load('unfinished.swf')
+  const rejected = assert.rejects(first, /lost while loading/)
+  partial.lose()
+  assert.equal(partial.instances[0].alive, false)
+  assert.equal(partial.element.isConnected, false)
+  partial.complete()
+  await rejected
+  await partial.settle()
+  assert.equal(partial.instances[0].alive, false)
+  assert.equal(partial.events.length, 1)
+
+  for (const action of ['replace', 'destroy']) {
+    const f = contextRecoveryFixture(t)
+    await f.player.load('bubble.swf')
+    ;(await f.player.callback('speak'))('before', [])
+    f.deferNext(); f.lose()
+    if (action === 'replace') await assert.rejects(f.player.load('replacement.swf'), /unfinished/)
+    else f.player.destroy()
+    f.complete()
+    await f.settle()
+    assert.equal(f.loads.length, 2)
+    assert.equal(f.player.isRecovering, false)
+    assert.equal(f.element.isConnected, false)
+    assert.equal(f.instances.at(-1).alive, false)
+    assert.equal(f.calls.length, 1, 'a cancelled recovery must not replay into a late builder')
+  }
+
+  const replay = contextRecoveryFixture(t)
+  await replay.player.load('bubble.swf')
+  ;(await replay.player.callback('speak'))('before', [])
+  replay.setPaused(true); replay.delayCallbacks(); replay.lose()
+  await replay.settle()
+  assert.equal(replay.player.isRecovering, true)
+  await replay.player.load('replacement.swf')
+  await replay.settle()
+  replay.setPaused(false)
+  await replay.settle()
+  assert.equal(replay.element.isConnected, true, 'cancelling old replay must not destroy a newer successful movie')
+  assert.equal(replay.instances.at(-1).alive, true)
+  assert.equal(replay.player.isRecovering, false)
+  assert.equal(replay.calls.length, 1)
+})
+
+test('repeated losses stop after three recoveries per thirty seconds', async t => {
+  const f = contextRecoveryFixture(t)
+  await f.player.load('bubble.swf')
+  for (let i = 0; i < 3; i++) {
+    f.lose(); await f.settle()
+    assert.equal(f.player.isRecovering, false)
+  }
+  assert.equal(f.loads.length, 4)
+  f.lose()
+  assert.equal(f.loads.length, 4, 'the limit must retire the failed renderer without starting another builder')
+  assert.equal(f.element.isConnected, false)
+  assert.equal(f.instances.at(-1).alive, false)
+  assert.match(f.events[0].detail.message, /recovery limit/)
+  await assert.rejects(f.player.load('again.swf'), /destroyed/)
+})
+
 test('network deadline aborts decoding and is disposed after completion', async () => {
   let completedSignal
   assert.equal(await withTimeoutSignal(5, async signal => { completedSignal = signal; return 7 }), 7)

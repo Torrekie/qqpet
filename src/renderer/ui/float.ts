@@ -7,7 +7,7 @@ let loaded: Promise<SwfPlayer> | null = null
 
 function moodPlayer(): Promise<SwfPlayer> {
   if (!loaded) {
-    const player = new SwfPlayer(el)
+    const player = new SwfPlayer(el, { recoverContext: true })
     loaded = player.load('pet/float/mood.swf').then(() => player).catch((error) => {
       player.destroy()
       loaded = null

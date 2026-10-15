@@ -5,6 +5,7 @@ import { createInterface } from 'node:readline'
 import { IPC } from '../shared/ipc'
 import { APP_ORIGIN } from './protocol'
 import { desktopCursor, petDisplay } from './desktop'
+import { fullscreenGate } from './fullscreen-gate'
 import { getSave } from './save'
 
 const CURSOR_INTERVAL_MS = 33
@@ -79,7 +80,7 @@ export function createPetWindow(): BrowserWindow {
   return win
 }
 
-// Prints 1 while another window is full screen, 0 otherwise, twice a second.
+// Prints 1 while another window is full screen, 0 otherwise, -1 while the taskbar (or nothing) is in front, twice a second.
 // SHQueryUserNotificationState: 2 busy, 3 Direct3D full screen, 4 presentation mode.
 // Windows reports 2 for some ordinary windows too (and while OBS runs), so 2 only counts when the foreground window
 // covers its monitor. The desktop (Progman/WorkerW) always covers it, so it never counts.
@@ -96,6 +97,11 @@ public struct M { public int Size; public R Mon, Work; public int Flags; }
 [DllImport("user32.dll")] static extern IntPtr MonitorFromWindow(IntPtr h, int flags);
 [DllImport("user32.dll")] static extern bool GetMonitorInfo(IntPtr m, ref M info);
 [DllImport("user32.dll", CharSet = CharSet.Unicode)] static extern int GetClassName(IntPtr h, System.Text.StringBuilder s, int n);
+public static bool Shell(IntPtr h) {
+  if (h == IntPtr.Zero) return true;
+  var c = new System.Text.StringBuilder(32); GetClassName(h, c, 32);
+  return c.ToString() == "Shell_TrayWnd" || c.ToString() == "Shell_SecondaryTrayWnd";
+}
 public static bool Covers(IntPtr h) {
   var c = new System.Text.StringBuilder(32); GetClassName(h, c, 32);
   if (c.ToString() == "Progman" || c.ToString() == "WorkerW") return false;
@@ -107,7 +113,8 @@ while ($true) {
   $s = 0
   [void][Q.W]::SHQueryUserNotificationState([ref]$s)
   $f = [Q.W]::GetForegroundWindow()
-  [Console]::WriteLine([int]($f -ne [IntPtr]PET -and ($s -eq 3 -or $s -eq 4 -or ($s -eq 2 -and [Q.W]::Covers($f)))))
+  if ([Q.W]::Shell($f)) { [Console]::WriteLine(-1) }
+  else { [Console]::WriteLine([int]($f -ne [IntPtr]PET -and ($s -eq 3 -or $s -eq 4 -or ($s -eq 2 -and [Q.W]::Covers($f))))) }
   Start-Sleep -Milliseconds 500
 }`
 
@@ -118,13 +125,7 @@ function hideOnFullscreen(win: BrowserWindow): void {
     stdio: ['ignore', 'pipe', 'ignore'],
     windowsHide: true,
   })
-  let full = false
-  createInterface({ input: ps.stdout }).on('line', (line) => {
-    if ((line === '1') === full) return
-    full = !full
-    if (full) win.hide()
-    else win.showInactive()
-  })
+  createInterface({ input: ps.stdout }).on('line', fullscreenGate((full) => (full ? win.hide() : win.showInactive())))
   win.on('closed', () => ps.kill())
 }
 

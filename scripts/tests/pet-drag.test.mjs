@@ -52,6 +52,7 @@ export function renderer(size, crop = { x: 0, y: 0 }, native = null, stage = 'Eg
   let nextTimer = 0
   const timers = new Map()
   let menuCloses = 0
+  const clickThrough = []
   let hitAt = null
   let area = initial.area ?? { width: 1920, height: 1080 }
   let cursorListener
@@ -84,10 +85,11 @@ export function renderer(size, crop = { x: 0, y: 0 }, native = null, stage = 'Eg
     },
     window: {
       addEventListener: windowEvents.addEventListener.bind(windowEvents),
+      dispatchEvent: windowEvents.dispatchEvent.bind(windowEvents),
       qqpet: {
         onCursor: listener => { cursorListener = listener }, onTrayClick: listener => { trayListener = listener }, onClipboard: noop,
         onPresence: noop, onFront: noop,
-        setClickThrough: noop,
+        setClickThrough: on => clickThrough.push(on),
         ...(native ? { setDragging: native } : {}),
       },
     },
@@ -132,13 +134,15 @@ export function renderer(size, crop = { x: 0, y: 0 }, native = null, stage = 'Eg
     target.dispatchEvent(event)
   }
   return {
-    info, poses, releases, pointer, save: services.save,
+    info, poses, releases, pointer, save: services.save, clickThrough,
     readInt: key => services.window.DataCenter_ReadInt32(key),
     movieMove: (dx, dy) => services.window.API.MoveBy(dx, dy),
     windowPointer: (type, x, y) => pointer(type, x, y, windowEvents),
     pause: () => { services.window.__qqpetHostPaused = true; services.window.__qqpetInput({ phase: 'cancel', id: -1, x: 0, y: 0 }) },
     cursor: point => { clock += 16; cursorListener(point) },
     trayClick: click => trayListener(click),
+    nativeInput: input => services.window.__qqpetInput(input),
+    hiddenChanged: () => windowEvents.dispatchEvent(new Event('qqpet-hidden-change')),
     menuCloses: () => menuCloses,
     /** Which page points elementFromPoint reports on a [data-hit] element, such as an open menu. */
     hitAt: test => { hitAt = test },
@@ -325,4 +329,72 @@ test('a cursor leaving the window for the tray keeps the menu open', () => {
   app.cursor({ x: 300, y: 1200 })
   app.runTimers()
   assert.equal(app.menuCloses(), 0)
+})
+
+test('hiding the pet releases its old hit box and showing it restores interaction', () => {
+  const app = renderer(144)
+  app.element.hidden = false
+  app.cursor({ x: 550, y: 340 })
+  assert.deepEqual(app.clickThrough, [false])
+  app.save.settings.hidden = true
+  app.cursor({ x: 551, y: 340 })
+  assert.deepEqual(app.clickThrough, [false, true])
+  app.save.settings.hidden = false
+  app.cursor({ x: 552, y: 340 })
+  assert.deepEqual(app.clickThrough, [false, true, false])
+})
+
+test('a pet restored hidden does not block clicks, but its open panels still accept them', () => {
+  const app = renderer(144)
+  app.element.hidden = false
+  app.save.settings.hidden = true
+  app.cursor({ x: 550, y: 340 })
+  assert.deepEqual(app.clickThrough, [])
+  app.hitAt((x, y) => x >= 100 && x < 210 && y >= 100 && y < 300)
+  app.cursor({ x: 150, y: 200 })
+  assert.deepEqual(app.clickThrough, [false])
+  app.cursor({ x: 550, y: 340 })
+  assert.deepEqual(app.clickThrough, [false, true])
+})
+
+test('hidden pets reject DOM dragging and context menus even if an event reaches them', () => {
+  let menus = 0
+  const app = renderer(144, { x: 0, y: 0 }, null, 'Egg', { ui: { openMenu: () => { menus++ } } })
+  app.save.settings.hidden = true
+  app.pointer('contextmenu', 550, 340)
+  assert.equal(menus, 0)
+  app.pointer('pointerdown', 550, 340)
+  app.pointer('pointermove', 610, 380)
+  app.pointer('pointerup', 610, 380)
+  assert.equal(app.info.lastX, 500)
+  assert.equal(app.info.lastY, 300)
+  assert.equal(app.poses.length, 0)
+})
+
+test('hidden pets reject native input and release click interception without another mouse move', () => {
+  const app = renderer(144)
+  app.element.hidden = false
+  app.cursor({ x: 550, y: 340 })
+  app.save.settings.hidden = true
+  app.hiddenChanged()
+  assert.deepEqual(app.clickThrough, [false, true])
+  for (const phase of ['begin', 'move', 'end']) app.nativeInput({ phase, id: 1, x: 610, y: 380 })
+  assert.equal(app.info.lastX, 500)
+  assert.equal(app.info.lastY, 300)
+  assert.equal(app.poses.length, 0)
+  app.save.settings.hidden = false
+  app.hiddenChanged()
+  assert.deepEqual(app.clickThrough, [false, true, false])
+})
+
+test('hiding cancels an active gesture and releases its pointer capture', () => {
+  const app = renderer(144)
+  app.pointer('pointerdown', 550, 340)
+  assert.equal(app.element.hasPointerCapture(1), true)
+  app.save.settings.hidden = true
+  app.hiddenChanged()
+  assert.equal(app.element.hasPointerCapture(1), false)
+  assert.deepEqual(app.releases.at(-1), [false, 0, 0])
+  app.pointer('pointermove', 610, 380)
+  assert.equal(app.info.lastX, 500)
 })

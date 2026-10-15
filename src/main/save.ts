@@ -1,5 +1,6 @@
 import { app } from 'electron'
 import { copyFileSync, existsSync, readFileSync, renameSync, writeFileSync } from 'node:fs'
+import { atomicWrite } from './atomic-write'
 import { join } from 'node:path'
 import type { SaveData, SavePatch, Sex } from '../shared/save'
 import { applyPatch, buried, petOf, startSave } from '../shared/save-logic'
@@ -30,9 +31,20 @@ function read(): Record<string, any> | null {
 }
 
 function write(data: Record<string, any>): void {
-  const tmp = `${FILE}.tmp`
-  writeFileSync(tmp, JSON.stringify(data))
-  renameSync(tmp, FILE)
+  atomicWrite(FILE, JSON.stringify(data))
+}
+
+let retry: ReturnType<typeof setTimeout> | undefined
+/** A save the file still refuses after the retries stays in memory and is written again shortly, never crashing the app. */
+function writeLater(): void {
+  clearTimeout(retry)
+  retry = undefined
+  try {
+    write(save)
+  } catch (e) {
+    console.error('save file is busy, retrying:', e)
+    retry = setTimeout(writeLater, 1000)
+  }
 }
 
 let save: SaveData
@@ -49,7 +61,7 @@ export function getSave(): SaveData {
 
 export function patchSave(patch: SavePatch): void {
   applyPatch(save, patch)
-  write(save)
+  writeLater()
 }
 
 export function exportSave(file: string): void {

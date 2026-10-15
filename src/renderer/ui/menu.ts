@@ -53,6 +53,7 @@ export function readopt(): void {
 export function setHidden(on: boolean): void {
   document.body.classList.toggle('petHidden', on)
   update('settings', { hidden: on })
+  window.dispatchEvent(new Event('qqpet-hidden-change'))
 }
 document.body.classList.toggle('petHidden', save.settings.hidden)
 

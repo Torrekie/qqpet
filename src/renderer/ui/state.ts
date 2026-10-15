@@ -157,7 +157,31 @@ function render(): void {
 // Only release the focus this panel took; chat, setup, community... may still need the window as a key target.
 let ownsFocus = false
 
+/** A panel opened from the Windows tray closes this long after the cursor last left it, or never came (#41). */
+const AUTO_CLOSE_MS = 3000
+let autoClose = false
+let hovered = false
+let closing: ReturnType<typeof setTimeout> | undefined
+const countdown = (): void => {
+  clearTimeout(closing)
+  closing = setTimeout(closeState, AUTO_CLOSE_MS)
+}
+
+// The click-through overlay sees no reliable pointerleave, so the native cursor decides.
+window.qqpet.onCursor?.((p) => {
+  if (!panel || !autoClose) return
+  const r = panel.getBoundingClientRect()
+  const inside = p.x >= r.left && p.x < r.right && p.y >= r.top && p.y < r.bottom
+  if (inside === hovered) return
+  hovered = inside
+  if (inside) clearTimeout(closing)
+  else countdown()
+})
+
 export function closeState(): void {
+  clearTimeout(closing)
+  closing = undefined
+  autoClose = hovered = false
   if (!panel) return
   panel.parentElement!.remove()
   panel = null
@@ -168,7 +192,7 @@ export function closeState(): void {
 window.addEventListener('blur', closeState)
 
 /** Opens the status panel from tray point (x, y), toward the screen's middle. */
-export function openState(x: number, y: number): void {
+export function openState(x: number, y: number, closesItself = false): void {
   closeState()
   panel = div('PetStateInfo focusPress')
   panel.dataset.hit = ''
@@ -183,6 +207,8 @@ export function openState(x: number, y: number): void {
     ownsFocus = true
     window.qqpet.setFocusable(true)
   }
+  autoClose = closesItself
+  if (autoClose) countdown()
 }
 
 let queued = 0

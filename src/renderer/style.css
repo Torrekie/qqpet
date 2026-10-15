@@ -285,6 +285,11 @@ body {
   opacity: 0;
   pointer-events: none;
 }
+/* Ruffle sets pointer-events:auto inline after swapping in a loaded animation. */
+.petHidden #pet *,
+.petHidden #talk * {
+  pointer-events: none !important;
+}
 .petHidden .ui-control {
   display: none;
 }

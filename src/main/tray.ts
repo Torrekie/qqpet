@@ -29,7 +29,7 @@ export function createPetTray(onClick: (e: TrayClick) => void) {
       ]),
     )
   } else {
-    tray.on('click', () => { if (!poppingMenu) onClick({ kind: 'state', ...screen.getCursorScreenPoint() }) })
+    tray.on('click', () => { if (!poppingMenu) onClick({ kind: 'state', ...screen.getCursorScreenPoint(), autoClose: process.platform === 'win32' }) })
     // macOS uses a native popup. Windows keeps the HTML menu at the cursor, including in the overflow flyout.
     tray.on('right-click', () => onClick({ kind: 'menu', ...(process.platform !== 'darwin' && screen.getCursorScreenPoint()) }))
   }

@@ -159,14 +159,14 @@ const syncDesktop = (p: DesktopCursor): boolean => {
   layout()
   return true
 }
-window.qqpet.onCursor((p) => {
+function updateCursor(p: DesktopCursor): void {
   if (!syncDesktop(p)) return
   dragMove?.(p)
   cursor.x = p.x
   cursor.y = p.y
   // The pet box is the hit target. elementFromPoint misses Ruffle's shadow canvas,
   // so the OS arrow shows until we also test the box itself.
-  const overPet = !petEl.hidden && p.x >= info.lastX && p.x < info.lastX + size && p.y >= info.lastY && p.y < info.lastY + size
+  const overPet = !petEl.hidden && !save.settings.hidden && p.x >= info.lastX && p.x < info.lastX + size && p.y >= info.lastY && p.y < info.lastY + size
   // The cursor is in page coordinates; a cropped page (HarmonyOS) is shifted by the crop.
   const { cropX = 0, cropY = 0 } = document.documentElement.dataset
   const el = document.elementFromPoint(p.x - Number(cropX), p.y - Number(cropY))
@@ -192,11 +192,18 @@ window.qqpet.onCursor((p) => {
   if (hit === interactive) return
   interactive = hit
   window.qqpet.setClickThrough(!hit)
+}
+window.qqpet.onCursor(updateCursor)
+window.addEventListener('qqpet-hidden-change', () => {
+  if (save.settings.hidden) petInput.cancel()
+  updateCursor(cursor)
 })
 // The store's asynchronous load may finish after the initial cursor broadcast.
 if (window.qqpet.setDragging) void window.qqpet.setDragging(false).then(syncDesktop)
 
-petEl.addEventListener('contextmenu', (e) => openMenu({ x: pageX(e), y: pageY(e), pet: true }, adoptPet))
+petEl.addEventListener('contextmenu', (e) => {
+  if (!save.settings.hidden) openMenu({ x: pageX(e), y: pageY(e), pet: true }, adoptPet)
+})
 
 let releaseDomInput = (): void => {}
 const petInput = createPetInput({
@@ -235,7 +242,7 @@ const petInput = createPetInput({
 }, touch ? HOLD_MS : 0)
 
 window.__qqpetInput = (input) => {
-  if (window.__qqpetHostPaused && input.phase !== 'cancel') return
+  if ((window.__qqpetHostPaused || save.settings.hidden) && input.phase !== 'cancel') return
   cursor.x = input.x
   cursor.y = input.y
   petInput.send({ ...input, source: 'native' })
@@ -243,7 +250,7 @@ window.__qqpetInput = (input) => {
 addEventListener('pagehide', () => petInput.cancel())
 
 petEl.addEventListener('pointerdown', (e) => {
-  if (window.__qqpetNativePetInput || window.__qqpetHostPaused || e.button !== 0 || (e.target as HTMLElement).closest('.point')) return
+  if (save.settings.hidden || window.__qqpetNativePetInput || window.__qqpetHostPaused || e.button !== 0 || (e.target as HTMLElement).closest('.point')) return
   if (petInput.active) return
   const nativeDrag = window.qqpet.setDragging
   let lastPoint: DesktopCursor = { x: pageX(e), y: pageY(e) }
@@ -382,7 +389,7 @@ window.qqpet.onTrayClick((c) => {
     openMenu({ x, y, pet: false }, adoptPet)
   } else if (save.havePet) {
     closeMenu()
-    openState(x, y)
+    openState(x, y, c.autoClose)
   } else adoptPet()
 })
 

@@ -62,6 +62,8 @@ export interface TrayClick {
   kind: 'state' | 'menu'
   x?: number
   y?: number
+  /** Windows tray left click: the status panel closes by itself unless the cursor stays on it (#41). */
+  autoClose?: boolean
 }
 
 /** Data only; menu actions stay in the renderer. */

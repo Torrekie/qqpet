@@ -5,6 +5,7 @@ import { retell, say } from '../ui/talk'
 import { DEAD, illOf } from './data/ills'
 import { TALK, type Line } from './data/talk'
 import { advanceTask, stopTask } from './activity'
+import { pickCare } from './care'
 import { IDLE, rephrase } from './ai'
 import { dateTalk, festival, greeting, loadCalendar } from './calendar'
 import { listGoods, tickTimed } from './goods'
@@ -373,12 +374,16 @@ const NEEDS = [
   { stat: 'mood', type: 'toy', act: '玩玩具' },
 ] as const
 
-/** Sweetheart: the pet tends its most urgent need with the first matching good it owns. */
+/** Sweetheart: the pet tends its first low need it has a good for, with the good that wastes least (#40). */
 function selfCare(): void {
-  const need = NEEDS.find((n) => info[n.stat] / save.petComputedlInfo[`${n.stat}Max`] < 0.6)
-  if (!need) return
-  const g = listGoods(need.type, 1, 1).list[0]
-  if (g) useItem(g, false, `[host]，我可以自己${need.act}哦！~~使用了：${g.name}`)
+  for (const need of NEEDS) {
+    const max = save.petComputedlInfo[`${need.stat}Max`]
+    if (info[need.stat] / max >= 0.6) continue
+    const g = pickCare(listGoods(need.type, 1, Number.MAX_SAFE_INTEGER).list, need.stat, max - info[need.stat])
+    if (!g) continue
+    useItem(g, false, `[host]，我可以自己${need.act}哦！~~使用了：${g.name}`)
+    return
+  }
 }
 
 /**

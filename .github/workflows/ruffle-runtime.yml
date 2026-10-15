@@ -1,0 +1,32 @@
+name: Ruffle runtime
+
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - .github/workflows/ruffle-runtime.yml
+      - scripts/build-ruffle-runtime.sh
+      - scripts/check-ruffle-lifetime.mjs
+      - scripts/patches/ruffle-audio-*.patch
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          lfs: false
+      - name: Fetch the lifetime check movie
+        run: git lfs pull --include=resources/pet/Action/GG/Egg/Stand.swf --exclude=""
+      - name: Build and verify the patched runtime
+        run: bash scripts/build-ruffle-runtime.sh
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ruffle-runtime
+          path: out/ruffle-runtime/
+          if-no-files-found: error
+          retention-days: 7

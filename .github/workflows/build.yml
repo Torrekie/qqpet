@@ -137,6 +137,7 @@ jobs:
           fetch-depth: 0
       - uses: actions/download-artifact@v4
         with:
+          pattern: qqpet-*
           path: artifacts
           merge-multiple: true
       # Commit subjects since the previous tag, grouped by gitmoji; docs, CI and refactors are left out.

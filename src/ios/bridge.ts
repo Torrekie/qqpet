@@ -8,7 +8,7 @@ import { TRAY_STATES, trayTip } from '../shared/tray'
 import { latestRelease } from '../shared/update'
 import { weather } from '../shared/weather'
 import { gameRewards } from './game-rewards'
-import { readRufflePanic } from './diagnostics'
+import { isFatalRufflePanic, readRufflePanic, type RufflePanic } from './diagnostics'
 import { startGeometry, type PetPointer } from './geometry'
 import { IOSRPC } from './rpc'
 import { IOSSaveWriter } from './save-writer'
@@ -105,15 +105,42 @@ function command(op: string, args: Record<string, unknown> = {}): void {
   void rpc.request(op, args).catch((error) => reportError(op, error))
 }
 let publishedRufflePanic = false
+let fatalRufflePanic = false
+let fatalPanicNotice: (RufflePanic & { observedAt: number; page: string }) | null = null
+let postedFatalPanic = false
+let fatalPanicAttempts = 0
+function publishFatalPanic(): void {
+  if (!fatalPanicNotice || postedFatalPanic || fatalPanicAttempts >= 3) return
+  fatalPanicAttempts++
+  try { rpc.notify('rufflePanic', fatalPanicNotice); postedFatalPanic = true }
+  catch (error) { console.error('QQPet could not publish its Ruffle failure:', error) }
+}
+function acceptRufflePanic(panic: RufflePanic): void {
+  if (!panic || typeof panic.details !== 'string' || !panic.details.trim()) return
+  const observed = { ...panic, observedAt: Date.now() / 1000, page: rpc.page }
+  if (!publishedRufflePanic) {
+    try {
+      rpc.notify('status', { lastRufflePanic: observed })
+      publishedRufflePanic = true
+    } catch { /* Keep the DOM/event details available for the next publication. */ }
+  }
+  if (fatalRufflePanic || !isFatalRufflePanic(panic)) return
+  fatalRufflePanic = true
+  fatalPanicNotice = observed
+  // Post native isolation before touching an already damaged Rust player.
+  // Pose retries are then stopped in the same JavaScript turn.
+  publishFatalPanic()
+  try { setPaused(true) }
+  catch (error) { console.error('QQPet could not suspend its failed Ruffle player:', error) }
+  finally { geometry?.stop() }
+}
 function publishRufflePanic(): void {
-  if (publishedRufflePanic) return
+  if (fatalRufflePanic) { publishFatalPanic(); return }
   const panic = readRufflePanic(document)
   if (!panic) return
-  try {
-    rpc.notify('status', { lastRufflePanic: { ...panic, observedAt: Date.now() / 1000, page: rpc.page } })
-    publishedRufflePanic = true
-  } catch { /* Retry at the next existing status/error event if publication failed. */ }
+  acceptRufflePanic(panic)
 }
+window.addEventListener('qqpet-ruffle-panic', (event) => acceptRufflePanic((event as CustomEvent<RufflePanic>).detail))
 function savedStatus(): void {
   publishRufflePanic()
   if (!model) return
@@ -244,6 +271,7 @@ function setText(payload: unknown): void {
   active.dispatchEvent(new Event('change', { bubbles: true }))
 }
 function setPaused(paused: boolean): void {
+  paused ||= fatalRufflePanic
   window.__qqpetHostPaused = paused
   geometry?.pause(paused)
   window.__qqpetSetPaused?.(paused)

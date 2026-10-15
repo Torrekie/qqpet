@@ -55,6 +55,8 @@ static CGFloat QPOrientationAngle(UIInterfaceOrientation orientation) {
 @property(nonatomic) NSInteger nextPointer;
 @property(nonatomic) NSUInteger crashes;
 @property(nonatomic) BOOL invalidated;
+@property(nonatomic) BOOL rendererFailed;
+@property(nonatomic, copy) NSDictionary *firstRufflePanic;
 @property(nonatomic) NSInteger flushID;
 @property(nonatomic) BOOL paused;
 @property(nonatomic, copy) NSString *flushError;
@@ -157,6 +159,7 @@ static CGFloat QPOrientationAngle(UIInterfaceOrientation orientation) {
     }
 }
 - (void)setPaused:(BOOL)paused {
+    paused=paused||self.rendererFailed;
     BOOL changed=_paused!=paused;
     _paused=paused;
     [self.audioOutput setHostPaused:paused];
@@ -236,8 +239,47 @@ static CGFloat QPOrientationAngle(UIInterfaceOrientation orientation) {
     __weak QPHostController *weakSelf=self;
     dispatch_after(dispatch_time(DISPATCH_TIME_NOW,2*NSEC_PER_SEC),dispatch_get_main_queue(),^{
         QPHostController *host=weakSelf;
-        if (host.flushID==request && host.flushCompletion) { host.flushError=@"Timed out flushing renderer save. Last acknowledged save is retained."; if (host.statusChanged) host.statusChanged(@{@"flushError":host.flushError,@"message":host.flushError}); [host finishFlush]; }
+        if (host.flushID==request && host.flushCompletion) { host.flushError=@"Timed out flushing renderer save. Last acknowledged save is retained."; if (host.statusChanged) host.statusChanged(host.rendererFailed?@{@"flushError":host.flushError}:@{@"flushError":host.flushError,@"message":host.flushError}); [host finishFlush]; }
     });
+}
+- (void)failRenderer:(NSString *)message reason:(NSString *)reason panic:(NSDictionary *)panic {
+    if (self.rendererFailed||self.invalidated) return;
+    self.rendererFailed=YES;
+    // Isolation precedes the save barrier: a broken canvas or stale drag must
+    // never leave a system-wide hit target while JavaScript is unresponsive.
+    if ([self.role isEqual:@"pet"]) { self.view.window.hidden=YES; self.view.window.userInteractionEnabled=NO; }
+    else { self.webView.hidden=YES; self.webView.userInteractionEnabled=NO; }
+    [self setPaused:YES];
+    QPResetCapturedTouches(); [self.pointerIDs removeAllObjects];
+    self.dragPlane.dragRegions=@[]; self.dragPlane.interactiveRegions=@[];
+    self.crop=CGRectZero; [self applyGeometry];
+    self.audioGeneration++; [self.audioOutput reset];
+    [self cancelTextInput:nil page:self.currentPage];
+    [self.deferredManagerRequests removeAllObjects];
+    if (self.currentPage&&self.cancelManagerOperation) self.cancelManagerOperation(nil,self.currentPage);
+    NSMutableDictionary *status=[@{@"state":@"error",@"fatalError":message,@"message":message} mutableCopy];
+    if (panic) {
+        if (!self.firstRufflePanic) self.firstRufflePanic=panic;
+        status[@"lastRufflePanic"]=self.firstRufflePanic;
+        status[@"fatalRufflePanic"]=panic;
+    }
+    if (self.statusChanged) self.statusChanged(status);
+    NSLog(@"QQPet Ruffle runtime isolated (%@)",self.role);
+    if ([self.role isEqual:@"pet"]) {
+        __weak QPHostController *weakSelf=self;
+        [self requestFlushThen:^{
+            QPHostController *host=weakSelf;
+            if (!host.invalidated&&host.stopRequested) host.stopRequested(reason);
+        }];
+    } else {
+        // A foreground game shares the manager's UIWindow. Leave its native
+        // navigation and End button usable instead of hiding that window.
+        UILabel *label=[[UILabel alloc] initWithFrame:self.view.bounds];
+        label.autoresizingMask=UIViewAutoresizingFlexibleWidth|UIViewAutoresizingFlexibleHeight;
+        label.text=@"Flash 运行发生错误。\n请结束此小游戏后重试。";
+        label.numberOfLines=0; label.textAlignment=NSTextAlignmentCenter; label.textColor=UIColor.whiteColor;
+        [self.view addSubview:label];
+    }
 }
 - (void)cancelTextInput:(NSNumber *)request page:(NSString *)page {
     if (!self.textInputRequest || (request&&![self.textInputRequest[@"id"] isEqual:request]) || (page&&![self.textInputRequest[@"page"] isEqual:page])) return;
@@ -252,7 +294,7 @@ static CGFloat QPOrientationAngle(UIInterfaceOrientation orientation) {
 }
 - (void)userContentController:(WKUserContentController *)controller didReceiveScriptMessage:(WKScriptMessage *)message {
     if ([message.name isEqual:@"qqpetAudio"]) {
-        if (self.invalidated || ![message.frameInfo.securityOrigin.protocol isEqual:@"http"] || ![message.frameInfo.securityOrigin.host isEqual:@"127.0.0.1"] || message.frameInfo.securityOrigin.port!=self.server.port || ![message.body isKindOfClass:NSDictionary.class]) return;
+        if (self.invalidated || self.rendererFailed || ![message.frameInfo.securityOrigin.protocol isEqual:@"http"] || ![message.frameInfo.securityOrigin.host isEqual:@"127.0.0.1"] || message.frameInfo.securityOrigin.port!=self.server.port || ![message.body isKindOfClass:NSDictionary.class]) return;
         // Audio also runs in local game iframes. Replies belong to the exact
         // originating frame and document, never to the top-level renderer.
         WKFrameInfo *frame=message.frameInfo;
@@ -279,6 +321,9 @@ static CGFloat QPOrientationAngle(UIInterfaceOrientation orientation) {
     NSString *networkKey=[NSString stringWithFormat:@"%@/%@",page,request];
     __weak QPHostController *weakSelf=self;
     void (^reply)(id,NSString *)=^(id value,NSString *error){ dispatch_async(dispatch_get_main_queue(),^{ [weakSelf resolve:request value:value error:error page:page]; }); };
+    // Only the existing persistence barrier may finish after a fatal runtime
+    // error. Stale focus, editor or game requests cannot reopen the HUD.
+    if (self.rendererFailed&&![@[@"writeSave",@"flushReady",@"cancel",@"status",@"rufflePanic",@"quit"] containsObject:op]) { reply(nil,@"The Flash runtime has stopped. Restart it from the manager."); return; }
     if ([op isEqual:@"bootstrap"]) {
         NSDictionary *capabilities=@{@"autoStart":@NO,@"autoStartReason":@"iOS 版由管理 App 手动启动，不安装后台守护程序。",@"clipboardWatch":@NO,@"frontWatch":@NO};
         UIUserInterfaceIdiom idiom=UIDevice.currentDevice.userInterfaceIdiom;
@@ -322,7 +367,7 @@ static CGFloat QPOrientationAngle(UIInterfaceOrientation orientation) {
         }]; self.network[networkKey]=task; [task resume];
     } else if ([op isEqual:@"cancel"]) { NSString *key=[NSString stringWithFormat:@"%@/%@",page,args[@"requestId"]]; [self.network[key] cancel]; [self.network removeObjectForKey:key]; [self.deferredManagerRequests removeObject:key]; [self cancelTextInput:args[@"requestId"] page:page]; if (self.cancelManagerOperation) self.cancelManagerOperation(args[@"requestId"],page); }
     else if ([op isEqual:@"setGeometry"]) {
-        if (![self.role isEqual:@"pet"]) return;
+        if (self.rendererFailed||![self.role isEqual:@"pet"]) return;
         CGSize size=CGSizeMake([args[@"viewport"][@"width"] doubleValue],[args[@"viewport"][@"height"] doubleValue]);
         CGRect crop=QPBox(args[@"bounds"]);
         if (!isfinite(size.width)||!isfinite(size.height)||size.width<1||size.height<1||size.width>8192||size.height>8192) return;
@@ -350,7 +395,22 @@ static CGFloat QPOrientationAngle(UIInterfaceOrientation orientation) {
     else if ([op isEqual:@"setAlwaysOnTop"]) { self.view.window.windowLevel=[args[@"enabled"] boolValue]?10000010:UIWindowLevelNormal; reply(nil,nil); }
     else if ([op isEqual:@"setAutoStart"]) reply(@{@"enabled":@NO,@"reason":@"iOS 版只支持从管理 App 手动启动，不安装后台守护程序。"},nil);
     else if ([op isEqual:@"setTray"]) { if (self.statusChanged) self.statusChanged(@{@"tray":args}); reply(nil,nil); }
-    else if ([op isEqual:@"status"]) { if (self.statusChanged) self.statusChanged(args); }
+    else if ([op isEqual:@"status"]) {
+        if (!self.rendererFailed&&self.statusChanged) {
+            NSMutableDictionary *status=[args mutableCopy];
+            NSDictionary *panic=args[@"lastRufflePanic"];
+            if ([panic isKindOfClass:NSDictionary.class]) {
+                if (!self.firstRufflePanic) self.firstRufflePanic=panic;
+                status[@"lastRufflePanic"]=self.firstRufflePanic;
+            }
+            self.statusChanged(status);
+        }
+    }
+    else if ([op isEqual:@"rufflePanic"]) {
+        NSString *details=args[@"details"];
+        if ([details isKindOfClass:NSString.class]&&details.length>0&&details.length<=32768)
+            [self failRenderer:@"Flash 运行发生错误，桌宠已停止。请在 QQPet 管理界面重新启动。" reason:@"ruffle-panic" panic:args];
+    }
     else if ([op isEqual:@"copyText"]) { UIPasteboard.generalPasteboard.string=args[@"text"]; reply(nil,nil); }
     else if ([op isEqual:@"openUrl"]) {
         NSURL *url=[NSURL URLWithString:args[@"url"] ?: @""];
@@ -361,7 +421,7 @@ static CGFloat QPOrientationAngle(UIInterfaceOrientation orientation) {
             NSInteger completedRequest=self.flushID;
             if ([args[@"error"] isKindOfClass:NSString.class]) self.flushError=args[@"error"];
             else if (![self.state matchesGeneration:args[@"generation"]]) self.flushError=@"Save generation changed during flush.";
-            if (self.flushError&&self.statusChanged) self.statusChanged(@{@"flushError":self.flushError,@"message":self.flushError});
+            if (self.flushError&&self.statusChanged) self.statusChanged(self.rendererFailed?@{@"flushError":self.flushError}:@{@"flushError":self.flushError,@"message":self.flushError});
             dispatch_async(self.state.fileQueue,^{ dispatch_async(dispatch_get_main_queue(),^{ if (self.flushID==completedRequest && self.flushCompletion) [self finishFlush]; }); });
         } reply(nil,nil);
     } else if ([op isEqual:@"quit"]) {
@@ -377,7 +437,7 @@ static CGFloat QPOrientationAngle(UIInterfaceOrientation orientation) {
         QPResetCapturedTouches(); [self applyGeometry];
         [self requestFlushThen:^{
             QPHostController *host=weakSelf;
-            if (!host||host.invalidated||![host.currentPage isEqual:page]||![host.textInputRequest[@"id"] isEqual:request]||![host.textInputRequest[@"page"] isEqual:page]) return;
+            if (!host||host.invalidated||host.rendererFailed||![host.currentPage isEqual:page]||![host.textInputRequest[@"id"] isEqual:request]||![host.textInputRequest[@"page"] isEqual:page]) return;
             if (host.flushError) { [host finishTextInput:request page:page value:nil error:host.flushError]; return; }
             UIKeyboardType keyboard=UIKeyboardTypeDefault;
             if ([type isEqual:@"url"]) keyboard=UIKeyboardTypeURL;
@@ -396,7 +456,7 @@ static CGFloat QPOrientationAngle(UIInterfaceOrientation orientation) {
         void (^present)(void)=^{
             BOOL pending=[self.deferredManagerRequests containsObject:networkKey];
             [self.deferredManagerRequests removeObject:networkKey];
-            if (!pending || self.invalidated || ![self.currentPage isEqual:page]) return;
+            if (!pending || self.invalidated || self.rendererFailed || ![self.currentPage isEqual:page]) return;
             if (self.flushError) reply(nil,self.flushError); else self.managerOperation(@{@"id":request,@"op":op,@"args":args,@"page":page},reply);
         };
         if ([self.role isEqual:@"pet"]) [self requestFlushThen:present]; else present();
@@ -408,6 +468,7 @@ static CGFloat QPOrientationAngle(UIInterfaceOrientation orientation) {
     if (finish) finish(); for (void (^completion)(void) in waiting) completion();
 }
 - (void)webView:(WKWebView *)webView didStartProvisionalNavigation:(WKNavigation *)navigation {
+    if (self.rendererFailed) return;
     self.audioGeneration++; [self.audioOutput reset];
     [self cancelTextInput:nil page:self.currentPage];
     if (self.currentPage && self.cancelManagerOperation) self.cancelManagerOperation(nil,self.currentPage);
@@ -416,9 +477,9 @@ static CGFloat QPOrientationAngle(UIInterfaceOrientation orientation) {
 }
 - (void)webView:(WKWebView *)webView didFinishNavigation:(WKNavigation *)navigation { [self applyGeometry]; [self setPaused:self.paused]; }
 - (void)webView:(WKWebView *)webView decidePolicyForNavigationAction:(WKNavigationAction *)action decisionHandler:(void (^)(WKNavigationActionPolicy))handler {
-    NSURL *url=action.request.URL; handler([url.host isEqual:@"127.0.0.1"] && url.port.unsignedIntegerValue==self.server.port ? WKNavigationActionPolicyAllow:WKNavigationActionPolicyCancel);
+    NSURL *url=action.request.URL; handler(!self.rendererFailed&&[url.host isEqual:@"127.0.0.1"] && url.port.unsignedIntegerValue==self.server.port ? WKNavigationActionPolicyAllow:WKNavigationActionPolicyCancel);
 }
-- (void)webView:(WKWebView *)webView didFailProvisionalNavigation:(WKNavigation *)navigation withError:(NSError *)error { if (self.statusChanged) self.statusChanged(@{@"state":@"error",@"message":error.localizedDescription}); }
+- (void)webView:(WKWebView *)webView didFailProvisionalNavigation:(WKNavigation *)navigation withError:(NSError *)error { if (!self.rendererFailed&&self.statusChanged) self.statusChanged(@{@"state":@"error",@"message":error.localizedDescription}); }
 - (void)webViewWebContentProcessDidTerminate:(WKWebView *)webView {
     [self webContentTerminated:webView reason:-1];
 }
@@ -428,6 +489,7 @@ static CGFloat QPOrientationAngle(UIInterfaceOrientation orientation) {
     [self webContentTerminated:webView reason:reason];
 }
 - (void)webContentTerminated:(WKWebView *)webView reason:(NSInteger)reason {
+    if (self.invalidated||self.rendererFailed) return;
     NSTimeInterval at=NSDate.date.timeIntervalSince1970;
     self.audioGeneration++; [self.audioOutput reset];
     [self cancelTextInput:nil page:self.currentPage];
@@ -438,6 +500,7 @@ static CGFloat QPOrientationAngle(UIInterfaceOrientation orientation) {
     NSDictionary *exit=@{@"at":@(at),@"reason":kind,@"rawReason":@(reason),@"paused":@(self.paused),@"crashes":@(self.crashes),@"role":self.role};
     if (self.statusChanged) self.statusChanged(@{@"state":@"error",@"message":[@"WebContent exited: " stringByAppendingString:kind],@"webContentTerminationReason":kind,@"crashes":@(self.crashes),@"lastWebContentExit":exit});
     if (self.crashes<=3&&!self.invalidated) [webView reload];
+    else [self failRenderer:@"Flash 进程多次退出，桌宠已停止。请在 QQPet 管理界面重新启动。" reason:[@"webcontent-recovery-exhausted:" stringByAppendingString:kind] panic:nil];
 }
 - (UIInterfaceOrientationMask)supportedInterfaceOrientations { return [self.role isEqual:@"pet"]?UIInterfaceOrientationMaskPortrait:UIInterfaceOrientationMaskAll; }
 - (BOOL)prefersStatusBarHidden { return [self.role isEqual:@"pet"]; }

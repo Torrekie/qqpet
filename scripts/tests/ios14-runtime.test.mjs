@@ -1,11 +1,19 @@
 import assert from 'node:assert/strict'
 import { readFileSync } from 'node:fs'
-import { stripTypeScriptTypes } from 'node:module'
+import { registerHooks, stripTypeScriptTypes } from 'node:module'
 import test from 'node:test'
 import { runInNewContext } from 'node:vm'
 import { abortReason, cloneJson, findLast, withTimeoutSignal } from '../../src/shared/compat.ts'
 import { createPetInput } from '../../src/renderer/pet/input.ts'
 import { visibleContent } from '../../src/mobile/visibility.ts'
+
+// Production uses bundler resolution; these existing direct source imports
+// need the same extensionless helper resolved when Node runs the tests.
+registerHooks({ resolve(specifier, context, nextResolve) {
+  if (specifier === '../../shared/ruffle-panic' && context.parentURL?.endsWith('/src/renderer/swf/player.ts'))
+    return nextResolve(new URL('../../shared/ruffle-panic.ts', context.parentURL).href, context)
+  return nextResolve(specifier, context)
+} })
 
 test('mood movie loads on first demand, shares concurrent requests and retries a failed generation', async () => {
   const instances = []
@@ -160,7 +168,7 @@ test('movie replacement releases retired GPU contexts without losing the live or
   globalThis.window = {}
   globalThis.document = doc
   globalThis.location = { href: 'http://127.0.0.1/index.html' }
-  globalThis.MutationObserver = class { observe() {} }
+  globalThis.MutationObserver = class { observe() {} disconnect() {} }
   let player
   try {
     const { SwfPlayer, setHostPaused } = await import('../../src/renderer/swf/player.ts')
@@ -260,7 +268,7 @@ test('Ruffle wrapper freezes its frame clock, keeps first-load callbacks, and ca
   globalThis.window = {}
   globalThis.document = doc
   globalThis.location = { href: 'http://127.0.0.1/index.html' }
-  globalThis.MutationObserver = class { observe() {} }
+  globalThis.MutationObserver = class { observe() {} disconnect() {} }
   globalThis.performance = { now: () => now }
   try {
     const { SwfPlayer, setHostPaused } = await import('../../src/renderer/swf/player.ts')
@@ -330,7 +338,7 @@ test('timed-out Ruffle generation is retired and a late build cannot replace its
   globalThis.window = { dispatchEvent: event => errors.push(event) }
   globalThis.document = doc
   globalThis.location = { href: 'http://127.0.0.1/index.html' }
-  globalThis.MutationObserver = class { observe() {} }
+  globalThis.MutationObserver = class { observe() {} disconnect() {} }
   globalThis.performance = { now: () => 0 }
   const parent = { ownerDocument: doc, appendChild() {} }
   let retry

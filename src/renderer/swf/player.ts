@@ -1,3 +1,5 @@
+import { isFatalRufflePanic, readPlayerPanic } from '../../shared/ruffle-panic'
+
 const FONT = 'HappyZcool-2016'
 // SWFs resolve relative URLs (configs, sub-movies) against the page, exactly
 // like the original <embed> inside dist/index.html did.
@@ -97,6 +99,8 @@ export class SwfPlayer {
   private pausedAt: number | null = null
   private pending = new Set<(error: Error) => void>()
   private keyboardCleanup = (): void => {}
+  private panicObserver: MutationObserver | null = null
+  private reportedPanic = false
 
   /** The SWF's ExternalInterface calls go to the globals of the window that owns `parent`. */
   constructor(parent: HTMLElement) {
@@ -106,6 +110,10 @@ export class SwfPlayer {
     parent.appendChild(this.el)
     safari14Styles(this.el)
     players.add(this)
+    if (this.el.shadowRoot) {
+      this.panicObserver = new MutationObserver(() => this.publishPanic())
+      this.panicObserver.observe(this.el.shadowRoot, { childList: true, subtree: true, characterData: true })
+    }
     // Ruffle types into text fields from a hidden <input> it empties on every input event, which breaks IME
     // composition (Chinese). Keep the composing keystrokes from it and hand it the committed text at once.
     const keyboard = this.el.shadowRoot?.getElementById('virtual-keyboard')
@@ -125,6 +133,16 @@ export class SwfPlayer {
 
   private cancelPending(message: string): void {
     for (const cancel of [...this.pending]) cancel(new Error(message))
+  }
+
+  private publishPanic(): void {
+    if (this.destroyed || this.reportedPanic) return
+    const panic = readPlayerPanic(this.el)
+    if (!panic) return
+    this.reportedPanic = true
+    // Publish while its shadow DOM still exists. This also covers players in
+    // SWF iframes created by this module, whose events belong to this host page.
+    window.dispatchEvent(new CustomEvent('qqpet-ruffle-panic', { detail: { ...panic, fatal: isFatalRufflePanic(panic) } }))
   }
 
   private bounded<T>(operation: Promise<T>, label: string, milliseconds: number): Promise<T> {
@@ -285,7 +303,9 @@ export class SwfPlayer {
 
   destroy(): void {
     if (this.destroyed) return
+    this.publishPanic()
     this.destroyed = true
+    this.panicObserver?.disconnect()
     ++this.revision
     this.cancelPending('SWF player was destroyed')
     this.keyboardCleanup()

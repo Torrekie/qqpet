@@ -193,6 +193,122 @@ test('movie replacement releases retired GPU contexts without losing the live or
   }
 })
 
+function removedCanvasFixture(t) {
+  const observers = []
+  let current = null
+  let finishLoad
+  class Observer {
+    records = []
+    constructor(callback) { this.callback = callback; observers.push(this) }
+    observe(target) { this.target = target; this.connected = true }
+    takeRecords() { return this.records.splice(0) }
+    disconnect() { this.connected = false; this.records.length = 0 }
+    notify() { const records = this.takeRecords(); if (this.connected && records.length) this.callback(records) }
+  }
+  const document = { documentElement: {}, createElement: () => ({}) }
+  const root = { getElementById: () => null, appendChild() {},
+    querySelector: selector => selector === '#container > canvas' ? current : null }
+  const api = {
+    metadata: { width: 100, height: 100, frameRate: 12, numFrames: 24 },
+    load: async () => {}, suspend() {}, resume() {}, isPlaying: true,
+  }
+  const shadowObserver = () => observers.find(observer => observer.target === root)
+  const detachCanvas = () => {
+    const canvas = current
+    if (canvas) {
+      canvas.isConnected = false
+      current = null
+      shadowObserver().records.push({ removedNodes: [canvas] })
+    }
+    return canvas
+  }
+  const element = {
+    style: {}, dataset: {}, ownerDocument: document, isConnected: true, shadowRoot: root,
+    ruffle: () => api,
+    // Match Ruffle's synchronous disconnectedCallback -> Rust Drop -> canvas.remove.
+    // By the time the outer document observer runs, shadow queries find nothing.
+    disconnectedCallback() { detachCanvas() },
+    remove() { this.isConnected = false; this.disconnectedCallback() },
+  }
+  document.defaultView = { RufflePlayer: { newest: () => ({ createPlayer: () => element }) } }
+  const context = {
+    document, window: {}, location: { href: 'http://example.test/index.html' },
+    MutationObserver: Observer, readPlayerPanic: () => null, isFatalRufflePanic: () => false,
+    URL, performance, setTimeout, clearTimeout,
+  }
+  const source = readFileSync(new URL('../../src/renderer/swf/player.ts', import.meta.url), 'utf8')
+    .replace(/^import .*$/gm, '').replace(/export (?=class|function)/g, '')
+  runInNewContext(stripTypeScriptTypes(source) + '\nthis.SwfPlayer=SwfPlayer', context)
+  const player = new context.SwfPlayer({ ownerDocument: document, appendChild() {} })
+  t.after(() => player.destroy())
+  const canvas = { nodeType: 1, tagName: 'CANVAS', isConnected: true, losses: 0,
+    querySelectorAll: () => [], getContext: type => type === 'webgl2' ? gl : null }
+  const gl = { isContextLost: () => canvas.losses > 0, getExtension: () => ({ loseContext: () => canvas.losses++ }) }
+  api.load = () => { current = canvas; return new Promise(resolve => { finishLoad = resolve }) }
+  return {
+    player, canvas, root,
+    finishLoad: () => finishLoad(), detachCanvas,
+    parentRemove() {
+      element.remove()
+      observers.find(observer => observer.target === document.documentElement).records.push({ removedNodes: [element] })
+    },
+    notify: () => observers.forEach(observer => observer.notify()),
+    notifyShadow: () => shadowObserver().notify(),
+    reinsert() { current = canvas; canvas.isConnected = true },
+    shadowObserver,
+  }
+}
+
+test('parent-first removal releases the canvas after Ruffle has already removed it from its shadow', async t => {
+  const f = removedCanvasFixture(t)
+  const loading = f.player.load('panel.swf')
+  f.finishLoad()
+  await loading
+  f.parentRemove()
+  assert.equal(f.root.querySelector('#container > canvas'), null)
+  assert.equal(f.canvas.losses, 0)
+  // Observers are delivered in creation order: document before the player's shadow.
+  // destroy must drain shadow records before disconnect would discard them.
+  f.notify()
+  assert.equal(f.canvas.losses, 1)
+  assert.equal(f.shadowObserver().connected, false)
+  f.player.destroy()
+  assert.equal(f.canvas.losses, 1)
+})
+
+test('in-flight and panic canvas removals release GPU state, while a reinserted live canvas is kept', async t => {
+  const pending = removedCanvasFixture(t)
+  const loading = pending.player.load('unfinished.swf')
+  const rejected = assert.rejects(loading, /destroyed|cancelled/)
+  pending.parentRemove()
+  assert.equal(pending.root.querySelector('#container > canvas'), null)
+  pending.notify()
+  assert.equal(pending.canvas.losses, 1, 'no successful load exists from which to cache this canvas')
+  pending.finishLoad()
+  await rejected
+
+  const panic = removedCanvasFixture(t)
+  const ready = panic.player.load('panic.swf')
+  panic.finishLoad()
+  await ready
+  panic.detachCanvas()
+  panic.notifyShadow()
+  assert.equal(panic.canvas.losses, 1, 'a panic can remove the canvas while its player stays connected')
+  panic.player.destroy()
+  assert.equal(panic.canvas.losses, 1)
+
+  const live = removedCanvasFixture(t)
+  const reloaded = live.player.load('live.swf')
+  live.finishLoad()
+  await reloaded
+  live.detachCanvas()
+  live.reinsert()
+  live.notifyShadow()
+  assert.equal(live.canvas.losses, 0, 'a removed record alone does not make a connected canvas retired')
+  live.player.destroy()
+  assert.equal(live.canvas.losses, 1)
+})
+
 test('network deadline aborts decoding and is disposed after completion', async () => {
   let completedSignal
   assert.equal(await withTimeoutSignal(5, async signal => { completedSignal = signal; return 7 }), 7)

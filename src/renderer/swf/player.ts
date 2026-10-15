@@ -119,6 +119,18 @@ function releaseRetiredCanvas(canvas: HTMLCanvasElement | null | undefined): voi
   } catch { /* A disposed canvas may already have lost its context. */ }
 }
 
+/** Ruffle removes its canvas synchronously on disconnect, before outer DOM observers run. */
+function releaseRemovedCanvases(records: MutationRecord[] = []): void {
+  for (const record of records) {
+    for (const node of record.removedNodes) {
+      if (node.nodeType !== 1) continue
+      const element = node as Element
+      if (element.tagName === 'CANVAS') releaseRetiredCanvas(element as HTMLCanvasElement)
+      for (const canvas of element.querySelectorAll<HTMLCanvasElement>('canvas')) releaseRetiredCanvas(canvas)
+    }
+  }
+}
+
 /** A detached generation can finish building after its original DOM disconnect. */
 function disposeDetached(el: RufflePlayerElement): void {
   const canvas = el.shadowRoot?.querySelector<HTMLCanvasElement>('#container > canvas')
@@ -155,6 +167,7 @@ export class SwfPlayer {
   private keyboardCleanup = (): void => {}
   private panicObserver: MutationObserver | null = null
   private reportedPanic = false
+  private canvas: HTMLCanvasElement | null = null
 
   /** The SWF's ExternalInterface calls go to the globals of the window that owns `parent`. */
   constructor(parent: HTMLElement) {
@@ -164,7 +177,10 @@ export class SwfPlayer {
     try {
       players.add(this)
       if (this.el.shadowRoot) {
-        this.panicObserver = new MutationObserver(() => this.publishPanic())
+        this.panicObserver = new MutationObserver((records) => {
+          this.publishPanic()
+          releaseRemovedCanvases(records)
+        })
         this.panicObserver.observe(this.el.shadowRoot, { childList: true, subtree: true, characterData: true })
       }
       // Ruffle types into text fields from a hidden <input> it empties on every input event, which breaks IME
@@ -276,6 +292,7 @@ export class SwfPlayer {
       const metadata = await this.waitFor(() => this.el.ruffle().metadata, 'SWF metadata', LOAD_MS)
       if (this.destroyed || revision !== this.revision) throw new Error('SWF load was cancelled')
       this.meta = metadata
+      this.canvas = this.el.shadowRoot?.querySelector<HTMLCanvasElement>('#container > canvas') ?? null
       this.startedAt = performance.now()
       this.stoppedAt = null
       this.pausedAt = null
@@ -362,13 +379,17 @@ export class SwfPlayer {
     if (this.destroyed) return
     this.publishPanic()
     this.destroyed = true
+    // The document observer can run before the shadow observer. Drain its
+    // canvas-removal records before disconnect discards the pending records.
+    releaseRemovedCanvases(this.panicObserver?.takeRecords?.())
     this.panicObserver?.disconnect()
     this.globalCleanup()
     ++this.revision
     this.cancelPending('SWF player was destroyed')
     this.keyboardCleanup()
     players.delete(this)
-    const canvas = this.el.shadowRoot?.querySelector<HTMLCanvasElement>('#container > canvas')
+    const canvas = this.el.shadowRoot?.querySelector<HTMLCanvasElement>('#container > canvas') ?? this.canvas
+    this.canvas = null
     this.el.remove()
     releaseRetiredCanvas(canvas)
   }

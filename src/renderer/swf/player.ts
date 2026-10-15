@@ -81,6 +81,12 @@ const RECOVERY_WINDOW_MS = 30_000
 const RECOVERY_LIMIT = 3
 let hostPaused = Boolean(window.__qqpetHostPaused)
 
+export interface SwfFailure {
+  url: string
+  message: string
+  terminal?: 'context-recovery-failed' | 'context-recovery-exhausted'
+}
+
 /** Display lifecycle is independent from the user's paused-growth setting. */
 export function setHostPaused(paused: boolean): void {
   hostPaused = paused
@@ -228,12 +234,12 @@ export class SwfPlayer {
     for (const cancel of [...this.pending]) cancel(new Error(message))
   }
 
-  private failMovie(url: string, error: unknown): void {
+  private failMovie(url: string, error: unknown, terminal?: SwfFailure['terminal']): void {
     if (this.destroyed) return
     const message = error instanceof Error ? error.message : String(error)
     this.cancelPending(message)
     this.destroy()
-    window.dispatchEvent(new CustomEvent('qqpet-swf-error', { detail: { url, message } }))
+    window.dispatchEvent(new CustomEvent<SwfFailure>('qqpet-swf-error', { detail: { url, message, ...(terminal ? { terminal } : {}) } }))
   }
 
   private contextLost(event: Event): void {
@@ -244,14 +250,14 @@ export class SwfPlayer {
     if (this.loading) {
       // An incomplete builder cannot be reused or recovered. Removing the
       // element synchronously destroys its Rust instance and cancels the load.
-      this.failMovie(this.el.dataset.swf ?? '', new Error('WebGL context was lost while loading'))
+      this.failMovie(this.el.dataset.swf ?? '', new Error('WebGL context was lost while loading'), this.recovering ? 'context-recovery-failed' : undefined)
       return
     }
     if (!this.meta || !this.lastLoad || canvas !== this.canvas) return
     const now = performance.now()
     this.recoveryTimes = this.recoveryTimes.filter(at => now - at < RECOVERY_WINDOW_MS)
     if (this.recoveryTimes.length >= RECOVERY_LIMIT) {
-      this.failMovie(this.lastLoad.url, new Error('WebGL context recovery limit exceeded'))
+      this.failMovie(this.lastLoad.url, new Error('WebGL context recovery limit exceeded'), 'context-recovery-exhausted')
       return
     }
     this.recoveryTimes.push(now)
@@ -300,7 +306,7 @@ export class SwfPlayer {
       if (this.stoppedAt !== null) this.el.ruffle().suspend()
       this.pauseForHost(hostPaused)
     } catch (error) {
-      if (current()) this.failMovie(request.url, error)
+      if (current()) this.failMovie(request.url, error, 'context-recovery-failed')
     } finally {
       if (this.recovery === recovery) this.recovering = false
     }
@@ -385,7 +391,11 @@ export class SwfPlayer {
     this.loading = true
     const previousCanvas = this.el.shadowRoot?.querySelector<HTMLCanvasElement>('#container > canvas')
     try {
-      const operation = this.el.ruffle().load({ ...CONFIG, ...options, base: new URL(base, BASE).href, url: new URL(url, BASE).href }).finally(() => {
+      const operation = this.el.ruffle().load({
+        ...CONFIG,
+        ...(this.recoverContext && window.__qqpetNativePetInput === true ? { preferredRenderer: 'webgl' } : {}),
+        ...options, base: new URL(base, BASE).href, url: new URL(url, BASE).href,
+      }).finally(() => {
         releaseRetiredCanvas(previousCanvas)
         if (this.destroyed || revision !== this.revision) disposeDetached(this.el)
       })
@@ -413,7 +423,9 @@ export class SwfPlayer {
       this.destroy()
       if (!cancelled) {
         const message = error instanceof Error ? error.message : String(error)
-        window.dispatchEvent(new CustomEvent('qqpet-swf-error', { detail: { url, message } }))
+        // loadMovie owns this failure before destroy invalidates the outer
+        // recovery token. A cancelled generation must never report it twice.
+        window.dispatchEvent(new CustomEvent<SwfFailure>('qqpet-swf-error', { detail: { url, message, ...(recovering ? { terminal: 'context-recovery-failed' as const } : {}) } }))
       }
       throw error
     } finally {

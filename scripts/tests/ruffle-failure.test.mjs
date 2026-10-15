@@ -171,6 +171,7 @@ test('an ordinary missing movie is diagnostic and a cancelled late load cannot b
   missing.api.load = async () => { missing.setPanic(details('Failed to fetch missing.swf')); throw new Error('404') }
   await assert.rejects(missing.movie.load('missing.swf'), /404/)
   assert.equal(missing.events.find(event => event.type === 'qqpet-ruffle-panic').detail.fatal, false)
+  assert.equal(missing.events.find(event => event.type === 'qqpet-swf-error').detail.terminal, undefined)
 
   const cancelled = movieFixture()
   let finish
@@ -185,9 +186,9 @@ test('an ordinary missing movie is diagnostic and a cancelled late load cannot b
   assert.equal(cancelled.events.length, 0)
 })
 
-function bridgeFixture({ failingNativePosts = 0, throwSuspend = false } = {}) {
+function bridgeFixture({ failingNativePosts = 0, failingSWFPosts = 0, throwSuspend = false } = {}) {
   const posts = [], order = [], listeners = new Map(), errors = []
-  let attempts = 0
+  let attempts = 0, swfAttempts = 0
   const window = { addEventListener: (name, callback) => listeners.set(name, callback), __qqpetSetPaused: paused => {
     order.push(['paused', paused])
     if (throwSuspend) throw new Error('poisoned WASM suspend')
@@ -196,16 +197,19 @@ function bridgeFixture({ failingNativePosts = 0, throwSuspend = false } = {}) {
     window, document: { querySelectorAll: () => [] }, Date,
     rpc: { page: 'test-page', notify: (op, args) => {
       if (op === 'rufflePanic' && ++attempts <= failingNativePosts) throw new Error('native transport unavailable')
+      if (op === 'swfTerminalFailure' && ++swfAttempts <= failingSWFPosts) throw new Error('native transport unavailable')
       posts.push({ op, args }); order.push(op)
     } },
     geometry: { pause: paused => order.push(['geometry-pause', paused]), stop: () => order.push('geometry-stop') },
     readRufflePanic, isFatalRufflePanic, console: { error: (...args) => errors.push(args) },
   }
   const policy = bridgeSource.slice(bridgeSource.indexOf('let publishedRufflePanic ='), bridgeSource.indexOf('function savedStatus()'))
+  const failure = bridgeSource.slice(bridgeSource.indexOf("window.addEventListener('qqpet-swf-error'"), bridgeSource.indexOf('function requireOwner()'))
   const pause = bridgeSource.slice(bridgeSource.indexOf('function setPaused('), bridgeSource.indexOf('\nwindow.__qqpetIOS ='))
-  runInNewContext(stripTypeScriptTypes(policy + pause) + '\nthis.setHostPaused=setPaused;this.publishPanic=publishRufflePanic', context)
+  runInNewContext(stripTypeScriptTypes(policy + failure + pause) + '\nthis.setHostPaused=setPaused;this.publishPanic=publishRufflePanic', context)
   return { posts, order, window, errors, attempts: () => attempts, publish: context.publishPanic,
-    pause: context.setHostPaused, panic: detail => listeners.get('qqpet-ruffle-panic')({ detail }) }
+    pause: context.setHostPaused, panic: detail => listeners.get('qqpet-ruffle-panic')({ detail }),
+    swfError: detail => listeners.get('qqpet-swf-error')({ detail }), swfAttempts: () => swfAttempts }
 }
 
 test('the iOS bridge isolates only the first fatal panic and cannot resume it on a presence change', () => {
@@ -250,4 +254,40 @@ test('failed native notification retries only through existing status publicatio
   for (let i = 0; i < 8; i++) disconnected.publish()
   assert.equal(disconnected.attempts(), 3)
   assert.equal(disconnected.window.__qqpetHostPaused, true)
+})
+
+test('only typed terminal context recovery failures stop the iOS renderer without fabricating a panic', () => {
+  const f = bridgeFixture()
+  f.swfError({ url: 'back.swf', message: '404' })
+  f.swfError({ url: 'back.swf', message: 'SWF load was cancelled' })
+  f.swfError({ url: 'back.swf', message: 'unrecognized failure', terminal: 'other' })
+  assert.equal(f.posts.some(post => post.op === 'swfTerminalFailure'), false)
+  assert.equal(f.window.__qqpetHostPaused, undefined)
+  const first = { url: 'front.swf', message: 'Recovery limit exceeded', terminal: 'context-recovery-exhausted' }
+  f.swfError(first)
+  f.swfError({ ...first, message: 'Secondary error' })
+  f.publish()
+  assert.equal(f.posts.filter(post => post.op === 'swfTerminalFailure').length, 1)
+  assert.equal(f.posts.find(post => post.op === 'swfTerminalFailure').args.message, first.message)
+  assert.equal(f.posts.some(post => post.op === 'rufflePanic'), false)
+  assert.equal(f.posts.some(post => post.args.lastRufflePanic), false)
+  assert.ok(f.order.indexOf('swfTerminalFailure') < f.order.findIndex(item => Array.isArray(item) && item[0] === 'paused'))
+  assert.equal(f.order.filter(item => item === 'geometry-stop').length, 1)
+  f.pause(false)
+  assert.equal(f.window.__qqpetHostPaused, true)
+})
+
+test('terminal recovery notification retries remain bounded even if suspending the damaged renderer throws', () => {
+  const f = bridgeFixture({ failingSWFPosts: 1, throwSuspend: true })
+  f.swfError({ url: 'bubble.swf', message: 'Rebuild failed', terminal: 'context-recovery-failed' })
+  assert.equal(f.window.__qqpetHostPaused, true)
+  assert.equal(f.order.at(-1), 'geometry-stop')
+  f.publish()
+  f.publish()
+  assert.equal(f.swfAttempts(), 2)
+  assert.equal(f.posts.filter(post => post.op === 'swfTerminalFailure').length, 1)
+  const disconnected = bridgeFixture({ failingSWFPosts: Infinity })
+  disconnected.swfError({ url: 'front.swf', message: 'Rebuild failed', terminal: 'context-recovery-failed' })
+  for (let i = 0; i < 8; i++) disconnected.publish()
+  assert.equal(disconnected.swfAttempts(), 3)
 })

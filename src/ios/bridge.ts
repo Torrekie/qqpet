@@ -3,6 +3,7 @@ import { calendar } from '../shared/calendar'
 import { cloneJson } from '../shared/compat'
 import type { Fetch, Point, QQPetApi, TrayClick, TrayState } from '../shared/ipc'
 import type { SaveData } from '../shared/save'
+import type { SwfFailure } from '../renderer/swf/player'
 import { applyPatch, buried, petOf, startSave } from '../shared/save-logic'
 import { TRAY_STATES, trayTip } from '../shared/tray'
 import { latestRelease } from '../shared/update'
@@ -109,6 +110,21 @@ let fatalRufflePanic = false
 let fatalPanicNotice: (RufflePanic & { observedAt: number; page: string }) | null = null
 let postedFatalPanic = false
 let fatalPanicAttempts = 0
+let terminalSWFNotice: (SwfFailure & { observedAt: number; page: string }) | null = null
+let postedTerminalSWF = false
+let terminalSWFAttempts = 0
+function publishTerminalSWF(): void {
+  if (!terminalSWFNotice || postedTerminalSWF || terminalSWFAttempts >= 3) return
+  terminalSWFAttempts++
+  try {
+    rpc.notify('swfTerminalFailure', { ...terminalSWFNotice,
+      url: terminalSWFNotice.url.slice(0, 8192),
+      message: (terminalSWFNotice.message || 'WebGL context recovery failed').slice(0, 8192),
+    })
+    postedTerminalSWF = true
+  }
+  catch (error) { console.error('QQPet could not publish its renderer failure:', error) }
+}
 function publishFatalPanic(): void {
   if (!fatalPanicNotice || postedFatalPanic || fatalPanicAttempts >= 3) return
   fatalPanicAttempts++
@@ -135,6 +151,7 @@ function acceptRufflePanic(panic: RufflePanic): void {
   finally { geometry?.stop() }
 }
 function publishRufflePanic(): void {
+  publishTerminalSWF()
   if (fatalRufflePanic) { publishFatalPanic(); return }
   const panic = readRufflePanic(document)
   if (!panic) return
@@ -172,8 +189,17 @@ function savedStatus(): void {
 }
 window.addEventListener('qqpet-swf-error', (event) => {
   publishRufflePanic()
-  const detail = (event as CustomEvent<{ url: string; message: string }>).detail
-  try { rpc.notify('status', { lastSWFError: { ...detail, observedAt: Date.now() / 1000, page: rpc.page } }) } catch { /* A disconnected page cannot publish diagnostics. */ }
+  const detail = (event as CustomEvent<SwfFailure>).detail
+  const observed = { ...detail, observedAt: Date.now() / 1000, page: rpc.page }
+  try { rpc.notify('status', { lastSWFError: observed }) } catch { /* A disconnected page cannot publish diagnostics. */ }
+  if (fatalRufflePanic || terminalSWFNotice || !['context-recovery-failed', 'context-recovery-exhausted'].includes(detail.terminal ?? '')) return
+  terminalSWFNotice = observed
+  // The renderer is already gone; stop interaction and pose retries until the
+  // native host completes the existing save-and-stop barrier.
+  publishTerminalSWF()
+  try { setPaused(true) }
+  catch (error) { console.error('QQPet could not suspend its failed renderer:', error) }
+  finally { geometry?.stop() }
 })
 function requireOwner(): { save: SaveData; persistence: IOSSaveWriter } {
   if (gamePage || !model || !writer) throw new Error('Only the initialized pet page can change its save.')
@@ -276,7 +302,7 @@ function setText(payload: unknown): void {
   active.dispatchEvent(new Event('change', { bubbles: true }))
 }
 function setPaused(paused: boolean): void {
-  paused ||= fatalRufflePanic
+  paused ||= fatalRufflePanic || Boolean(terminalSWFNotice)
   window.__qqpetHostPaused = paused
   geometry?.pause(paused)
   window.__qqpetSetPaused?.(paused)

@@ -33,13 +33,9 @@ static CGFloat QPOrientationAngle(UIInterfaceOrientation orientation) {
     return 0;
 }
 
+@class QPDragPlane;
 @interface QPTransparentRootView : UIView
-@end
-@implementation QPTransparentRootView
-- (UIView *)hitTest:(CGPoint)point withEvent:(UIEvent *)event {
-    UIView *hit=[super hitTest:point withEvent:event];
-    return hit==self ? nil : hit;
-}
+@property(nonatomic, weak) QPDragPlane *dragPlane;
 @end
 
 @class QPHostController;
@@ -47,6 +43,21 @@ static CGFloat QPOrientationAngle(UIInterfaceOrientation orientation) {
 @property(nonatomic, weak) QPHostController *host;
 @property(nonatomic, copy) NSArray *dragRegions;
 @property(nonatomic, copy) NSArray *interactiveRegions;
+@end
+@implementation QPTransparentRootView
+- (UIView *)hitTest:(CGPoint)point withEvent:(UIEvent *)event {
+    if (self.dragPlane) {
+        // WK's content view fills the crop, including transparent gaps between
+        // the pet and its panels. Only the pet host installs this input filter.
+        CGPoint local=[self.dragPlane convertPoint:point fromView:self];
+        BOOL inside=NO;
+        for (NSDictionary *box in self.dragPlane.interactiveRegions) if (CGRectContainsPoint(QPBox(box),local)) { inside=YES; break; }
+        if (!inside) for (NSDictionary *box in self.dragPlane.dragRegions) if (CGRectContainsPoint(QPBox(box),local)) { inside=YES; break; }
+        if (!inside) return nil;
+    }
+    UIView *hit=[super hitTest:point withEvent:event];
+    return hit==self ? nil : hit;
+}
 @end
 @interface QPHostController () <WKScriptMessageHandler,WKNavigationDelegate>
 @property(nonatomic, strong) WKWebView *webView;
@@ -146,6 +157,7 @@ static CGFloat QPOrientationAngle(UIInterfaceOrientation orientation) {
         self.dragPlane=[[QPDragPlane alloc] initWithFrame:self.viewport.bounds];
         self.dragPlane.host=self; self.dragPlane.backgroundColor=UIColor.clearColor; self.dragPlane.multipleTouchEnabled=YES;
         [self.viewport addSubview:self.dragPlane];
+        ((QPTransparentRootView *)self.view).dragPlane=self.dragPlane;
     }
 }
 - (void)loadURL:(NSURL *)url { [self loadViewIfNeeded]; [self.webView loadRequest:[NSURLRequest requestWithURL:url]]; }
@@ -347,7 +359,7 @@ static CGFloat QPOrientationAngle(UIInterfaceOrientation orientation) {
     void (^reply)(id,NSString *)=^(id value,NSString *error){ dispatch_async(dispatch_get_main_queue(),^{ [weakSelf resolve:request value:value error:error page:page]; }); };
     // Only the existing persistence barrier may finish after a fatal runtime
     // error. Stale focus, editor or game requests cannot reopen the HUD.
-    if (self.rendererFailed&&![@[@"writeSave",@"flushReady",@"cancel",@"status",@"rufflePanic",@"quit"] containsObject:op]) { reply(nil,@"The Flash runtime has stopped. Restart it from the manager."); return; }
+    if (self.rendererFailed&&![@[@"writeSave",@"flushReady",@"cancel",@"status",@"rufflePanic",@"swfTerminalFailure",@"quit"] containsObject:op]) { reply(nil,@"The Flash runtime has stopped. Restart it from the manager."); return; }
     if ([op isEqual:@"bootstrap"]) {
         NSDictionary *capabilities=@{@"autoStart":@NO,@"autoStartReason":@"iOS 版由管理 App 手动启动，不安装后台守护程序。",@"clipboardWatch":@NO,@"frontWatch":@NO};
         UIUserInterfaceIdiom idiom=UIDevice.currentDevice.userInterfaceIdiom;
@@ -434,6 +446,13 @@ static CGFloat QPOrientationAngle(UIInterfaceOrientation orientation) {
         NSString *details=args[@"details"];
         if ([details isKindOfClass:NSString.class]&&details.length>0&&details.length<=32768)
             [self failRenderer:@"Flash 运行发生错误，桌宠已停止。请在 QQPet 管理界面重新启动。" reason:@"ruffle-panic" panic:args];
+    }
+    else if ([op isEqual:@"swfTerminalFailure"]) {
+        NSString *terminal=args[@"terminal"], *url=args[@"url"], *message=args[@"message"];
+        if (self.rendererFailed || ![terminal isKindOfClass:NSString.class] || ![@[@"context-recovery-failed",@"context-recovery-exhausted"] containsObject:terminal] ||
+            ![url isKindOfClass:NSString.class] || url.length>8192 || ![message isKindOfClass:NSString.class] || !message.length || message.length>8192) return;
+        [self failRenderer:@"Flash 画面恢复失败，桌宠已停止。请在 QQPet 管理界面重新启动。" reason:[@"swf-" stringByAppendingString:terminal] panic:nil];
+        if (self.statusChanged) self.statusChanged(@{@"lastSWFError":args});
     }
     else if ([op isEqual:@"copyText"]) { UIPasteboard.generalPasteboard.string=args[@"text"]; reply(nil,nil); }
     else if ([op isEqual:@"openUrl"]) {

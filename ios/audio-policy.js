@@ -102,7 +102,7 @@ window.__qqpetRespectSystemAudio = true;
       this.context._sources.set(this._source, this);
       observed(this.context._afterCreate('enqueue', {
         source: this._source, frames: this.buffer.length, sampleRate: this.buffer.sampleRate,
-        channels: this.buffer.numberOfChannels, when, pcm,
+        channels: this.buffer.numberOfChannels, when: this.context._scheduleTime(when), pcm,
       }));
     }
     stop() { throw new Error('QQPet AudioQueue does not support stopping an individual source.'); }
@@ -126,6 +126,7 @@ window.__qqpetRespectSystemAudio = true;
       this._pending = new Map();
       this._state = 'suspended';
       this._time = 0;
+      this._clockOffset = 0;
       this._lastReadTime = 0;
       this._anchor = now();
       this._closing = false;
@@ -134,18 +135,32 @@ window.__qqpetRespectSystemAudio = true;
       this._ready = this._post('create', { sampleRate: 44100, channels: 2 });
     }
     get state() { return this._state; }
+    _nativeTime() {
+      return this._time + (this._state === 'running' ? Math.max(0, now() - this._anchor) / 1000 : 0);
+    }
     get currentTime() {
-      const estimate = this._time + (this._state === 'running' ? Math.max(0, now() - this._anchor) / 1000 : 0);
+      const estimate = this._nativeTime() + this._clockOffset;
       // An asynchronous native snapshot may arrive after a later interpolated
       // value was read. Preserve monotonic reads without offsetting the native
-      // anchor; a suspended context stays frozen until native time catches up.
+      // anchor. A suspended context stays frozen at its last observed value.
       this._lastReadTime = Math.max(this._lastReadTime, estimate);
       return this._lastReadTime;
+    }
+    _scheduleTime(when) {
+      // A delayed pause can leave the public monotonic clock ahead of the
+      // queue. Both reads and absolute scheduling use the same stable epoch,
+      // so repeated ping-pong refills cannot accumulate extra silent gaps.
+      return Math.max(0, when - this._clockOffset);
     }
     _sync(message) {
       if (!Number.isFinite(message.time) || message.time < 0 || !['running', 'suspended', 'closed'].includes(message.state))
         throw new Error('Malformed native AudioQueue clock or state.');
       const changed = this._state !== message.state;
+      if (changed && (message.state === 'suspended' || message.state === 'running')) {
+        // Only a pause/resume boundary establishes a new virtual epoch. Late
+        // running snapshots retain their native anchor and cannot drift it.
+        this._clockOffset = Math.max(this._clockOffset, this._lastReadTime - message.time);
+      }
       // Native AudioQueue time is authoritative; interpolation only bridges
       // native replies/completions, and never drives source completion.
       this._time = message.time;
@@ -191,7 +206,7 @@ window.__qqpetRespectSystemAudio = true;
         } catch { /* The failed bridge may already have gone away. */ }
       }
       // All internal ownership and promise cleanup precedes user callbacks.
-      this._sync({ time, state: 'closed' });
+      this._sync({ time: time - this._clockOffset, state: 'closed' });
     }
     createBuffer(channels, frames, sampleRate) {
       if (this._closing) throw new Error('AudioContext is closed.');
@@ -209,7 +224,7 @@ window.__qqpetRespectSystemAudio = true;
       this._closing = true;
       this._clearSources();
       this._closePromise = this._afterCreate('close');
-      this._sync({ time: this.currentTime, state: 'closed' });
+      this._sync({ time: this.currentTime - this._clockOffset, state: 'closed' });
       return this._closePromise;
     }
   }

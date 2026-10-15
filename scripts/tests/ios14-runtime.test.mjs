@@ -309,9 +309,9 @@ test('in-flight and panic canvas removals release GPU state, while a reinserted 
   assert.equal(live.canvas.losses, 1)
 })
 
-function contextRecoveryFixture(t, recoverContext = true) {
+function contextRecoveryFixture(t, recoverContext = true, nativePetInput = false) {
   const events = [], calls = [], loads = [], instances = [], timers = new Map(), listeners = new Map()
-  let current = null, instance = null, deferred = false, delayedCallbacks = false, complete = null, now = 0
+  let current = null, instance = null, deferred = false, delayedCallbacks = false, complete = null, now = 0, failure = null
   const document = { documentElement: {}, createElement: () => ({}) }
   const root = {
     getElementById: () => null, appendChild() {},
@@ -338,6 +338,7 @@ function contextRecoveryFixture(t, recoverContext = true) {
       loads.push(options)
       const fresh = { id: instances.length + 1, alive: true, register: null }
       instances.push(fresh); instance = fresh; current = createCanvas(); this.metadata = null; this.suspended = false
+      if (failure) { const error = failure; failure = null; return Promise.reject(error) }
       const register = () => {
         element.speak = (...args) => {
           assert.equal(fresh.alive, true, 'a retired Rust callback must never be invoked')
@@ -367,7 +368,7 @@ function contextRecoveryFixture(t, recoverContext = true) {
   }
   document.defaultView = { RufflePlayer: { newest: () => ({ createPlayer: () => element }) } }
   const context = {
-    document, window: { dispatchEvent: event => events.push(event) }, location: { href: 'http://example.test/index.html' },
+    document, window: { __qqpetNativePetInput: nativePetInput, dispatchEvent: event => events.push(event) }, location: { href: 'http://example.test/index.html' },
     MutationObserver: class { observe() {} disconnect() {} },
     readPlayerPanic: () => null, isFatalRufflePanic: () => false,
     CustomEvent: class { constructor(type, { detail }) { this.type = type; this.detail = detail } },
@@ -385,11 +386,34 @@ function contextRecoveryFixture(t, recoverContext = true) {
     get canvas() { return current },
     lose(canvas = current) { canvas.lost = true; listeners.get('webglcontextlost')?.({ target: canvas }) },
     deferNext() { deferred = true }, delayCallbacks() { delayedCallbacks = true },
+    rejectNext(error) { failure = error },
     complete() { assert.ok(complete); complete() },
     setPaused: context.setHostPaused, advance: milliseconds => { now += milliseconds },
     async settle() { for (let i = 0; i < 30; i++) await Promise.resolve() },
   }
 }
+
+test('only native iOS persistent players prefer WebGL and explicit renderer options still win', async t => {
+  const native = contextRecoveryFixture(t, true, true)
+  await native.player.load('pet.swf')
+  assert.equal(native.loads[0].preferredRenderer, 'webgl')
+  native.lose(); await native.settle()
+  assert.equal(native.loads[1].preferredRenderer, 'webgl', 'context recovery keeps the host renderer policy')
+  await native.player.load('override.swf', './', { preferredRenderer: 'canvas' })
+  assert.equal(native.loads[2].preferredRenderer, 'canvas')
+  native.lose(); await native.settle()
+  assert.equal(native.loads[3].preferredRenderer, 'canvas', 'recovery also retains an explicit override')
+
+  const game = contextRecoveryFixture(t, false, true)
+  await game.player.load('game.swf')
+  assert.equal(Object.hasOwn(game.loads[0], 'preferredRenderer'), false, 'ordinary games retain the Ruffle default')
+  const otherPlatform = contextRecoveryFixture(t, true, false)
+  await otherPlatform.player.load('pet.swf')
+  assert.equal(Object.hasOwn(otherPlatform.loads[0], 'preferredRenderer'), false, 'other platform hosts retain the Ruffle default')
+  const nonBoolean = contextRecoveryFixture(t, true, 1)
+  await nonBoolean.player.load('pet.swf')
+  assert.equal(Object.hasOwn(nonBoolean.loads[0], 'preferredRenderer'), false, 'the native host flag must be explicitly true')
+})
 
 test('opt-in context loss synchronously retires Rust, rebuilds and replays only the latest callback', async t => {
   const f = contextRecoveryFixture(t)
@@ -478,6 +502,7 @@ test('loading loss and explicit replacement/destroy cancel recovery without late
   await partial.settle()
   assert.equal(partial.instances[0].alive, false)
   assert.equal(partial.events.length, 1)
+  assert.equal(partial.events[0].detail.terminal, undefined, 'an initial back load failure must remain recoverable by its consumer')
 
   for (const action of ['replace', 'destroy']) {
     const f = contextRecoveryFixture(t)
@@ -493,6 +518,7 @@ test('loading loss and explicit replacement/destroy cancel recovery without late
     assert.equal(f.element.isConnected, false)
     assert.equal(f.instances.at(-1).alive, false)
     assert.equal(f.calls.length, 1, 'a cancelled recovery must not replay into a late builder')
+    assert.equal(f.events.length, 0, 'explicit replacement or removal must not stop the host')
   }
 
   const replay = contextRecoveryFixture(t)
@@ -524,7 +550,34 @@ test('repeated losses stop after three recoveries per thirty seconds', async t =
   assert.equal(f.element.isConnected, false)
   assert.equal(f.instances.at(-1).alive, false)
   assert.match(f.events[0].detail.message, /recovery limit/)
+  assert.equal(f.events[0].detail.terminal, 'context-recovery-exhausted')
+  assert.equal(f.events.length, 1)
   await assert.rejects(f.player.load('again.swf'), /destroyed/)
+})
+
+test('a recovery load rejection reports one terminal failure even after it destroys the player', async t => {
+  const f = contextRecoveryFixture(t)
+  await f.player.load('bubble.swf')
+  f.rejectNext(new Error('Renderer rebuild failed'))
+  f.lose()
+  await f.settle()
+  assert.equal(f.element.isConnected, false)
+  assert.equal(f.player.isRecovering, false)
+  assert.equal(f.events.length, 1)
+  assert.equal(f.events[0].detail.terminal, 'context-recovery-failed')
+  assert.match(f.events[0].detail.message, /Renderer rebuild failed/)
+})
+
+test('losing a rebuilding context reports one terminal failure and retires the late builder', async t => {
+  const f = contextRecoveryFixture(t)
+  await f.player.load('bubble.swf')
+  f.deferNext(); f.lose(); f.lose()
+  assert.equal(f.events.length, 1)
+  assert.equal(f.events[0].detail.terminal, 'context-recovery-failed')
+  f.complete()
+  await f.settle()
+  assert.equal(f.events.length, 1, 'the cancelled outer recovery cannot report the same failure again')
+  assert.equal(f.instances.at(-1).alive, false)
 })
 
 test('network deadline aborts decoding and is disposed after completion', async () => {
@@ -637,6 +690,140 @@ test('failed overlay readback stays conservative, throttles retries and recovers
   assert.notEqual(context.cover(player), box)
   assert.equal(attempts, 4)
   assert.equal(context.coverageTiming().readbackFailures, 2)
+})
+
+function geometryFixture() {
+  let now = 1000, nextFrame = 0
+  const frames = new Map(), messages = [], reads = new Map()
+  let currentCanvas
+  const pen = {
+    clearRect() {},
+    drawImage(canvas) {
+      currentCanvas = canvas
+      reads.set(canvas, (reads.get(canvas) ?? 0) + 1)
+      if (canvas.fail) throw new Error('Readback unavailable')
+    },
+    getImageData() {
+      const data = new Uint8ClampedArray(64 * 64 * 4)
+      const a = currentCanvas.alpha
+      if (a) for (let y = a.top; y < a.bottom; y++) for (let x = a.left; x < a.right; x++) data[(y * 64 + x) * 4 + 3] = 255
+      return { data }
+    },
+  }
+  class Canvas { getContext() { return pen } }
+  const document = { defaultView: { getComputedStyle: el => el.style }, createElement: () => new Canvas(), addEventListener() {}, removeEventListener() {} }
+  const element = (id, tagName, box, parentElement = null) => ({
+    id, tagName, parentElement, ownerDocument: document, getRootNode: () => ({}),
+    style: { display: 'block', visibility: 'visible', opacity: '1', pointerEvents: 'auto', backgroundImage: '' },
+    getBoundingClientRect: () => ({ ...box, right: box.left + box.width, bottom: box.top + box.height }),
+    closest(selector) { return selector === '#pet' ? (id === 'pet' ? this : parentElement?.closest(selector) ?? null) : null },
+    matches: selector => selector === '.point' && id === 'point',
+  })
+  const pet = element('pet', 'DIV', { left: 100, top: 100, width: 160, height: 160 })
+  const movie = (name, parent, alpha) => {
+    const el = element('', 'RUFFLE-PLAYER', { left: 100, top: 100, width: 160, height: 160 }, parent)
+    el.dataset = { swf: name }
+    el.canvas = { alpha }
+    el.metadata = { numFrames: 240, frameRate: 12 }
+    el.shadowRoot = { querySelector: () => el.canvas }
+    el.ruffle = () => ({ metadata: el.metadata })
+    return el
+  }
+  const front = movie('peek.swf', pet, { left: 0, top: 16, right: 8, bottom: 56 })
+  const back = movie('incoming.swf', pet, { left: 0, top: 0, right: 64, bottom: 64 })
+  back.style.opacity = '0'
+  const decoration = element('mood', 'DIV', { left: 100, top: 100, width: 160, height: 160 }, pet)
+  const mood = movie('mood.swf', decoration, { left: 0, top: 0, right: 64, bottom: 64 })
+  mood.style.opacity = '0'
+  const point = element('point', 'DIV', { left: 140, top: 180, width: 10, height: 10 }, pet)
+  const toolbar = element('toolbar', 'DIV', { left: 200, top: 300, width: 0, height: 0 })
+  const button = element('button', 'BUTTON', { left: 200, top: 300, width: 30, height: 30 }, toolbar)
+  const menu = element('menu', 'DIV', { left: 400, top: 200, width: 100, height: 100 })
+  const controls = [point, toolbar, button, menu]
+  for (const el of controls) el.style.display = 'none'
+  const all = [pet, front, back, decoration, mood, ...controls]
+  document.body = { querySelectorAll: selector => selector === '*' ? all : [front, back, mood, ...controls] }
+  const context = {
+    document, window: {}, HTMLCanvasElement: Canvas, visibleContent,
+    performance: { now: () => now }, getComputedStyle: el => el.style,
+    innerWidth: 1000, innerHeight: 800,
+    requestAnimationFrame: callback => { frames.set(++nextFrame, callback); return nextFrame },
+    cancelAnimationFrame: id => frames.delete(id),
+  }
+  const overlay = readFileSync(new URL('../../src/mobile/overlay.ts', import.meta.url), 'utf8')
+  const geometry = readFileSync(new URL('../../src/ios/geometry.ts', import.meta.url), 'utf8')
+  const source = [overlay, geometry].map(code => stripTypeScriptTypes(code.replace(/^import .*$/gm, '').replace(/^export /gm, ''))).join('\n')
+  // Both modules share a realm, just as the production geometry imports the
+  // overlay's cached sampler. JSON snapshots normalize cross-realm prototypes.
+  const fixtureContext = { ...context, messages }
+  runInNewContext(source + '\nthis.geometry=startGeometry({notify:(op,args)=>messages.push({op,args})})', fixtureContext)
+  return {
+    front, back, mood, pet, point, button, menu, reads, geometry: fixtureContext.geometry,
+    frame(ms = 16) {
+      now += ms
+      const pending = [...frames.values()]
+      frames.clear()
+      for (const callback of pending) callback()
+      return JSON.parse(JSON.stringify(messages.at(-1).args))
+    },
+    controls(on) { for (const el of controls) el.style.display = on ? 'block' : 'none' },
+  }
+}
+
+test('iOS peeking uses the current alpha box without another readback or waiting for the full movie', () => {
+  const f = geometryFixture()
+  let payload = f.frame()
+  assert.equal(payload.dragRegions.length, 1)
+  assert.ok(payload.dragRegions[0].width < 32, 'a thin peek must not retain its 160px SWF input box')
+  assert.ok(payload.bounds.width >= 160, 'the visual crop remains conservative for unseen later frames')
+  assert.equal(f.reads.get(f.front.canvas), 1, 'drawing and hit bounds reuse the same sample')
+  assert.equal(f.reads.get(f.back.canvas), undefined, 'an opacity-zero incoming movie is not sampled')
+  const left = payload.dragRegions[0].x
+  f.front.canvas.alpha = { left: 56, top: 16, right: 64, bottom: 56 }
+  f.frame(16)
+  assert.equal(f.reads.get(f.front.canvas), 1)
+  payload = f.frame(151)
+  assert.equal(f.reads.get(f.front.canvas), 2)
+  assert.ok(payload.dragRegions[0].x > left + 100, 'the live hit box follows the latest edge rather than a movie-wide union')
+  f.front.canvas.alpha = null
+  payload = f.frame(151)
+  assert.deepEqual(payload.dragRegions, [], 'an empty sampled frame does not swallow the old pet rectangle')
+  f.geometry.stop()
+})
+
+test('iOS unknown or hidden movies do not claim an empty SWF box; read failures keep only the last alpha hit', () => {
+  const f = geometryFixture()
+  const first = f.frame().dragRegions
+  f.front.canvas.fail = true
+  assert.deepEqual(f.frame(151).dragRegions, first)
+  f.front.metadata = null
+  assert.deepEqual(f.frame().dragRegions, [], 'metadata not ready must not become a full pet drag target')
+  f.front.style.opacity = '0'
+  f.back.style.opacity = '1'
+  f.back.canvas = null
+  assert.deepEqual(f.frame().dragRegions, [], 'a loading front without pixels must not capture its empty layout box')
+  f.geometry.stop()
+})
+
+test('iOS keeps point and overflowing control regions separate and captures an existing drag across blank space', () => {
+  const f = geometryFixture()
+  f.controls(true)
+  f.mood.style.opacity = '1'
+  let payload = f.frame()
+  assert.equal(payload.dragRegions.length, 1, 'the decorative mood renderer is not a pet drag target')
+  assert.ok(payload.interactiveRegions.some(r => r.x === 140 && r.width === 10), 'face points keep their own input region')
+  assert.ok(payload.interactiveRegions.some(r => r.x === 200 && r.width === 30), 'overflowing children of a zero-sized toolbar remain interactive')
+  assert.ok(payload.interactiveRegions.some(r => r.x === 400 && r.width === 100), 'menus remain interactive across the visual crop')
+  f.geometry.pointer({ phase: 'begin', id: 1, x: 110, y: 160 })
+  f.geometry.pointer({ phase: 'move', id: 1, x: 800, y: 700 })
+  payload = f.frame()
+  assert.equal(payload.dragging, true)
+  assert.deepEqual(payload.bounds, { x: 0, y: 0, width: 1000, height: 800 })
+  f.geometry.pointer({ phase: 'end', id: 1, x: 800, y: 700 })
+  payload = f.frame()
+  assert.equal(payload.dragging, false)
+  assert.ok(payload.bounds.width < 1000)
+  f.geometry.stop()
 })
 
 test('Ruffle wrapper freezes its frame clock, keeps first-load callbacks, and cancels destroyed waits', async () => {

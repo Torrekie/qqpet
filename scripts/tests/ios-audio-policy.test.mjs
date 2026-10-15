@@ -117,10 +117,10 @@ test('native clocks drive interpolation, suspend freezes, and an external interr
   f.reply(f.messages[3], { time: 2.3, state: 'running' })
   await again
   f.tick(100)
-  assert.equal(context.currentTime, 2.5)
+  assert.equal(context.currentTime, 2.6, 'resume advances immediately from the frozen read clock')
   f.receive({ page: f.messages[0].page, context: f.messages[0].context, type: 'state', time: 2.35, state: 'suspended' })
   f.tick(10000)
-  assert.equal(context.currentTime, 2.5)
+  assert.equal(context.currentTime, 2.6)
   assert.deepEqual(states, ['running', 'suspended', 'running', 'suspended'])
 })
 
@@ -321,4 +321,100 @@ test('late running snapshots never rewind reads or accumulate an artificial nati
   f.receive({ ...snapshot, time: 10.45, state: 'suspended' })
   f.tick(20000)
   assert.equal(context.currentTime, 10.5, 'paused time never extrapolates')
+})
+
+test('scheduling translates a monotonic clock floor to the resumed native timebase', async () => {
+  const f = fixture()
+  const context = new f.window.AudioContext()
+  f.reply(f.messages[0])
+  const resumed = context.resume()
+  await settle()
+  f.reply(f.messages[1], { time: 10, state: 'running' })
+  await resumed
+  f.tick(10000)
+  assert.equal(context.currentTime, 20)
+  f.receive({ page: f.messages[0].page, context: f.messages[0].context, type: 'state', time: 10.1, state: 'suspended' })
+  const again = context.resume()
+  await settle()
+  f.reply(f.messages[2], { time: 10.1, state: 'running' })
+  await again
+  assert.equal(context.currentTime, 20, 'late suspension must not rewind the public clock')
+  f.source(context).start(context.currentTime + 0.25)
+  await settle()
+  const enqueued = f.messages[3]
+  assert.equal(enqueued.op, 'enqueue')
+  assert.ok(Math.abs(enqueued.when - 10.35) < 1e-9, 'retain the quarter-second future delay without a >2s native gap')
+  f.reply(enqueued, { time: 10.1, state: 'running' })
+  f.receive({ page: enqueued.page, context: enqueued.context, type: 'ended', source: enqueued.source, time: 10.4, state: 'running' })
+  assert.equal(context.state, 'running')
+  assert.equal(f.window.__qqpetAudioPolicyState, 'native-audioqueue')
+  f.tick(200)
+  assert.ok(Math.abs(context.currentTime - 20.5) < 1e-9)
+  f.receive({ page: enqueued.page, context: enqueued.context, type: 'state', time: 10.5, state: 'running' })
+  f.source(context).start(20.75)
+  await settle()
+  assert.ok(Math.abs(f.messages[4].when - 10.85) < 1e-9, 'a late running snapshot must not change the fixed scheduling epoch')
+  f.reply(f.messages[4], { time: 10.5, state: 'running' })
+  const frozen = context.currentTime
+  const closed = context.close()
+  assert.equal(context.currentTime, frozen, 'local close must not count the virtual offset twice')
+  await settle()
+  f.reply(f.messages[5], { time: 10.5, state: 'closed' })
+  await closed
+  assert.equal(context.currentTime, frozen)
+})
+
+test('scheduling without a clock floor preserves future absolute times and immediate playback', async () => {
+  const f = fixture()
+  const context = new f.window.AudioContext()
+  f.reply(f.messages[0])
+  const resumed = context.resume()
+  await settle()
+  f.reply(f.messages[1], { time: 10, state: 'running' })
+  await resumed
+  f.tick(250)
+  f.source(context).start(10.75)
+  f.source(context).start()
+  await settle()
+  assert.equal(f.messages[2].when, 10.75)
+  assert.equal(f.messages[3].when, 0)
+})
+
+test('a resumed clock epoch keeps continuous Ruffle-style ping-pong refills on the native timeline', async () => {
+  const f = fixture()
+  const context = new f.window.AudioContext()
+  f.reply(f.messages[0])
+  const resumed = context.resume()
+  await settle()
+  f.reply(f.messages[1], { time: 10, state: 'running' })
+  await resumed
+  f.tick(10000)
+  assert.equal(context.currentTime, 20)
+  f.receive({ page: f.messages[0].page, context: f.messages[0].context, type: 'state', time: 10.1, state: 'suspended' })
+  const again = context.resume()
+  await settle()
+  f.reply(f.messages[2], { time: 10.1, state: 'running' })
+  await again
+  const duration = 1024 / 44100
+  let scheduled = context.currentTime, nativeTime = 10.1, completions = 0
+  function refill() {
+    const source = f.source(context)
+    source.onended = () => { completions++; refill() }
+    scheduled = Math.max(scheduled, context.currentTime)
+    source.start(scheduled)
+    scheduled += duration
+  }
+  refill(); refill()
+  await settle()
+  for (let index = 0; index < 96; index++) {
+    const enqueued = f.messages[3 + index]
+    assert.equal(enqueued.op, 'enqueue')
+    assert.ok(enqueued.when - nativeTime <= 2 * duration + 1e-9, 'a refill must not accumulate extra gaps as native time advances')
+    f.reply(enqueued, { time: nativeTime, state: 'running' })
+    f.tick(duration * 1000); nativeTime += duration
+    f.receive({ page: enqueued.page, context: enqueued.context, type: 'ended', source: enqueued.source, time: nativeTime, state: 'running' })
+    await settle()
+  }
+  assert.equal(completions, 96, 'only the supplied native ended events refill the stream')
+  assert.ok(Math.abs(context.currentTime - (20 + 96 * duration)) < 1e-9, 'resume advances at the native rate instead of waiting for the read floor to catch up')
 })

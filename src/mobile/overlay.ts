@@ -34,7 +34,7 @@ const pen = probe.getContext('2d')!
  */
 const movies = new Map<string, { part: Box | null; known: boolean }>()
 /** Per player: the movie it shows, since when without a break, and the last look. */
-let shows = new WeakMap<Element, { url: string; since: number; seen: number; at: number; part: Box | null | undefined }>()
+let shows = new WeakMap<Element, { url: string; since: number; seen: number; at: number; part: Box | null | undefined; hit?: Box | null }>()
 let readbackFailures = 0
 let lastReadbackMs: number | null = null
 
@@ -76,38 +76,46 @@ function learn(url: string, part: Box | null, through: boolean): Box | null | un
   return m.known ? m.part : undefined
 }
 
-function drawn(player: RufflePlayerElement, box: DOMRect): Box | null {
+function drawn(player: RufflePlayerElement, box: DOMRect, current = false): Box | null {
   const canvas = player.shadowRoot?.querySelector('canvas')
   const url = player.dataset.swf
   const meta = player.ruffle().metadata
-  if (!canvas || !url || !meta) return box
+  if (!canvas || !url || !meta) return current ? null : box
   const now = performance.now()
   let s = shows.get(player)
   if (!s || s.url !== url || now - s.seen > GAP_MS) shows.set(player, (s = { url, since: now, seen: now, at: 0, part: null }))
   s.seen = now
   if (now - s.at > LOOK_MS) {
-    // Failed GPU/Canvas reads must obey the same retry interval as successful
-    // ones, and must not reuse a narrow bound from an earlier animation frame.
+    // Failed reads obey the same retry interval. The drawing crop must not
+    // reuse an earlier narrow frame; input can retain its last sampled target.
     s.at = now
-    try { s.part = look(canvas) }
+    try { s.part = look(canvas); s.hit = s.part }
     catch { s.part = undefined; readbackFailures++ }
     finally { lastReadbackMs = Math.round(Math.max(0, performance.now() - now) * 100) / 100 }
   }
-  if (s.part === undefined) return box
   // A one-frame movie is drawn by its script (the mood "+5"): what it drew before says nothing about what comes next.
-  const p = meta.numFrames > 1 ? learn(url, s.part, now - s.since >= (meta.numFrames / meta.frameRate) * 1000) : s.part
-  if (p === undefined) return box
+  // Hit testing uses this frame, not everything the movie may draw later. A
+  // failed read can keep its last successful hit box, never the whole SWF box.
+  let p = current ? s.hit : s.part
+  if (!current && p !== undefined && meta.numFrames > 1) p = learn(url, p, now - s.since >= (meta.numFrames / meta.frameRate) * 1000)
+  if (p === undefined) return current ? null : box
   if (!p) return null
   const { left, top, width: w, height: h } = box
   return { left: left + p.left * w, top: top + p.top * h, right: left + p.right * w, bottom: top + p.bottom * h }
 }
 
 /** What of `el` the window must cover; null for nothing. An equipped background covers the whole pet box. */
-export function cover(el: Element): Box | null {
+function coverage(el: Element, current: boolean): Box | null {
   const box = el.getBoundingClientRect()
   // A hidden pet (opacity 0) or speech bubble (visibility hidden) must not keep a window that swallows touches.
   if (!visibleContent(el)) return null
   if (el.id === 'pet' && (el as HTMLElement).style.backgroundImage) return box
   if (!el.closest('#pet') || el.matches('.point')) return box
-  return el.tagName === 'RUFFLE-PLAYER' ? drawn(el as RufflePlayerElement, box) : null
+  return el.tagName === 'RUFFLE-PLAYER' ? drawn(el as RufflePlayerElement, box, current) : null
 }
+
+/** Conservative drawing bounds used by the mobile overlay crop. */
+export function cover(el: Element): Box | null { return coverage(el, false) }
+
+/** iOS input bounds reuse the latest alpha sample, including its antialiasing margin. */
+export function hitCover(el: Element): Box | null { return coverage(el, true) }

@@ -46,6 +46,11 @@ jobs:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
+      - name: Fetch upstream release tags for fork versions
+        if: github.repository != 'AnkioTomas/qqpet'
+        run: |
+          git -c 'http.https://github.com/.extraheader=' fetch --no-tags --no-recurse-submodules \
+            https://github.com/AnkioTomas/qqpet.git 'refs/tags/v*:refs/tags/v*'
       - uses: actions/setup-node@v4
         with:
           node-version: 22

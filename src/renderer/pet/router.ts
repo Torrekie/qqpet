@@ -104,7 +104,8 @@ const looks = (): Record<string, string[]> => ({
 export const ACTIONS: Record<Sex, ActionData> = {
   // GG has the newer client's extra clips (#25).
   GG: {
-    play: { egg: 47, kid: 127, peaceful: 127 },
+    // Imported Egg P30..47 and Kid P112..127 draw adult GG despite their directories.
+    play: { egg: 29, kid: 111, peaceful: 127 },
     variants: {
       Egg: {
         // motion/drag*101213 and motion/hide_*130906 under Egg/Kid draw the adult (hide_right130906 is the Adult

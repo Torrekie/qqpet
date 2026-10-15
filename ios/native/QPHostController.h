@@ -15,6 +15,7 @@ NS_ASSUME_NONNULL_BEGIN
 - (void)loadURL:(NSURL *)url;
 - (void)emit:(NSString *)event value:(id _Nullable)value;
 - (void)setPaused:(BOOL)paused;
+- (void)updateProcessPolicy;
 - (void)updateOrientation:(UIInterfaceOrientation)orientation;
 - (void)requestFlushThen:(void (^)(void))completion;
 - (void)invalidate;

@@ -1,8 +1,101 @@
 import assert from 'node:assert/strict'
+import { readFileSync } from 'node:fs'
+import { stripTypeScriptTypes } from 'node:module'
 import test from 'node:test'
+import { runInNewContext } from 'node:vm'
 import { abortReason, cloneJson, findLast, withTimeoutSignal } from '../../src/shared/compat.ts'
 import { createPetInput } from '../../src/renderer/pet/input.ts'
 import { visibleContent } from '../../src/mobile/visibility.ts'
+
+test('mood movie loads on first demand, shares concurrent requests and retries a failed generation', async () => {
+  const instances = []
+  const values = []
+  class Movie {
+    constructor() { instances.push(this) }
+    load() { return new Promise((resolve, reject) => { this.complete = resolve; this.fail = reject }) }
+    async callback(name) { assert.equal(name, 'setdata'); return value => values.push(value) }
+    destroy() { this.destroyed = true }
+  }
+  const context = {
+    SwfPlayer: Movie,
+    document: { createElement: () => ({}), getElementById: () => ({ appendChild() {} }) },
+  }
+  const source = readFileSync(new URL('../../src/renderer/ui/float.ts', import.meta.url), 'utf8')
+  runInNewContext(stripTypeScriptTypes(source.replace(/^import .*$/gm, '').replace('export async function', 'async function')) + '\nthis.floatMood = floatMood', context)
+  assert.equal(instances.length, 0, 'bootstrapping the pet must not allocate a mood runtime')
+  const first = context.floatMood(1)
+  const second = context.floatMood(2)
+  assert.equal(instances.length, 1)
+  const failed = Promise.all([assert.rejects(first, /unavailable/), assert.rejects(second, /unavailable/)])
+  instances[0].fail(new Error('Movie unavailable'))
+  await failed
+  assert.equal(instances[0].destroyed, true)
+
+  const retry = context.floatMood(3)
+  const concurrent = context.floatMood(4)
+  assert.equal(instances.length, 2, 'retry requests share one replacement runtime')
+  instances[1].complete()
+  await Promise.all([retry, concurrent])
+  await context.floatMood(5)
+  assert.deepEqual(values, [3, 4, 5])
+  assert.equal(instances.length, 2, 'later requests reuse the successful movie')
+})
+
+test('pet swaps after paint, retires the previous runtime and preserves its front when loading fails', async () => {
+  const instances = []
+  class Movie {
+    constructor() {
+      this.el = { style: { setProperty() {} } }
+      this.waitingForPaint = new Promise(resolve => { this.beginPaint = resolve })
+      instances.push(this)
+    }
+    setMuted(value) { this.muted = value }
+    async load(url) { this.url = url; if (this.failure) throw this.failure }
+    nextPaint() {
+      const painted = new Promise(resolve => { this.paint = resolve })
+      this.beginPaint()
+      return painted
+    }
+    destroy() { this.destroyed = true }
+  }
+  const save = { settings: { sound: true } }
+  const context = { save, SwfPlayer: Movie }
+  const source = readFileSync(new URL('../../src/renderer/swf/pet-swf.ts', import.meta.url), 'utf8')
+  runInNewContext(stripTypeScriptTypes(source.replace(/^import .*$/gm, '').replace('export class', 'class')) + '\nthis.PetSwf = PetSwf', context)
+  const pet = new context.PetSwf({ isConnected: true })
+  const first = pet.load('first.swf')
+  await instances[1].waitingForPaint
+  assert.equal(pet.front, instances[0], 'keep the previous front until the hidden canvas paints')
+  assert.equal(instances[0].destroyed, undefined)
+  assert.equal(instances[1].el.style.opacity, '0')
+  instances[1].paint()
+  await first
+  assert.equal(pet.front, instances[1])
+  assert.equal(pet.front.el.style.opacity, '1')
+  assert.equal(instances[0].destroyed, true)
+  assert.equal(instances[2].url, undefined, 'the new back element must not allocate a runtime yet')
+
+  instances[2].failure = new Error('Movie unavailable')
+  await assert.rejects(pet.load('broken.swf'), /unavailable/)
+  assert.equal(instances[2].destroyed, true)
+  assert.equal(pet.front, instances[1])
+  assert.equal(pet.front.destroyed, undefined)
+  assert.equal(pet.front.el.style.opacity, '1')
+
+  save.settings.sound = false
+  pet.applySound()
+  assert.equal(instances[1].muted, true)
+  assert.equal(instances[3].muted, true)
+  const retry = pet.load('retry.swf')
+  await instances[3].waitingForPaint
+  instances[3].paint()
+  await retry
+  assert.equal(pet.front, instances[3])
+  assert.equal(instances[1].destroyed, true)
+  assert.equal(instances[4].url, undefined)
+  assert.equal(instances[4].muted, true)
+  assert.equal(instances.filter(movie => movie.url && !movie.destroyed).length, 1)
+})
 
 test('JSON bridge clones remain independent and greeting search preserves its source', () => {
   const original = { pet: { name: '企鹅' }, goods: [1, 2] }

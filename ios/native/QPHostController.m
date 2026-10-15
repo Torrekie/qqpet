@@ -1,6 +1,8 @@
 #import "QPHostController.h"
 #import "QPEventBridge.h"
 #import "QPSystemTextInput.h"
+#import "QPMediaPolicy.h"
+#import "QPMemoryPolicy.h"
 #import <math.h>
 
 static NSString *QPJSON(id value) {
@@ -59,6 +61,9 @@ static CGFloat QPOrientationAngle(UIInterfaceOrientation orientation) {
 @property(nonatomic, copy) void (^flushCompletion)(void);
 @property(nonatomic, strong) NSMutableArray *flushWaiters;
 @property(nonatomic, strong) NSMutableSet<NSString *> *deferredManagerRequests;
+@property(nonatomic, strong) QPMemoryPolicy *processPolicy;
+@property(nonatomic, copy) NSString *mediaAudioProcess;
+@property(nonatomic, copy) NSDictionary *lastProcessPolicy;
 @property(nonatomic, copy) NSString *currentPage;
 @property(nonatomic, strong) QPSystemTextInput *textInput;
 @property(nonatomic, copy) NSDictionary *textInputRequest;
@@ -85,6 +90,7 @@ static CGFloat QPOrientationAngle(UIInterfaceOrientation orientation) {
     if ((self=[super init])) {
         _state=state; _server=server; _role=[role copy];
         _network=[NSMutableDictionary new]; _pointerIDs=[NSMutableDictionary new]; _flushWaiters=[NSMutableArray new]; _deferredManagerRequests=[NSMutableSet new];
+        if ([role isEqual:@"pet"]) _processPolicy=[QPMemoryPolicy new];
         _session=[NSURLSession sessionWithConfiguration:NSURLSessionConfiguration.ephemeralSessionConfiguration];
         _orientation=UIInterfaceOrientationPortrait;
         _cssSize=UIScreen.mainScreen.fixedCoordinateSpace.bounds.size;
@@ -101,6 +107,7 @@ static CGFloat QPOrientationAngle(UIInterfaceOrientation orientation) {
     [self.cropView addSubview:self.viewport];
     WKWebViewConfiguration *config=[WKWebViewConfiguration new];
     config.allowsInlineMediaPlayback=YES; config.mediaTypesRequiringUserActionForPlayback=WKAudiovisualMediaTypeNone;
+    self.mediaAudioProcess=QPConfigureMediaPreferences(config.preferences);
     // Apply before Ruffle in every document, including its separate SWF frames.
     NSURL *audioPolicyURL=[NSBundle.mainBundle URLForResource:@"audio-policy" withExtension:@"js"];
     NSError *audioPolicyError=nil;
@@ -148,7 +155,17 @@ static CGFloat QPOrientationAngle(UIInterfaceOrientation orientation) {
     if (paused) { QPResetCapturedTouches(); [self.pointerIDs removeAllObjects]; }
     [self emit:@"paused" value:@(paused)];
     if (changed) [self emit:@"presence" value:@(paused)];
+    [self updateProcessPolicy];
     [self applyGeometry];
+}
+- (void)updateProcessPolicy {
+    if (!self.processPolicy) return;
+    NSDictionary *policy=[self.processPolicy updateWithWebView:self.webView active:!self.paused&&!self.invalidated];
+    NSDictionary *status=@{@"mediaAudioProcess":self.mediaAudioProcess ?: @"system-default",@"processPolicy":policy};
+    if (![status isEqual:self.lastProcessPolicy]) {
+        self.lastProcessPolicy=status;
+        if (self.statusChanged) self.statusChanged(status);
+    }
 }
 - (CGRect)physicalCrop {
     CGRect r=self.crop; CGSize physical=UIScreen.mainScreen.fixedCoordinateSpace.bounds.size;
@@ -369,6 +386,7 @@ static CGFloat QPOrientationAngle(UIInterfaceOrientation orientation) {
     [self cancelTextInput:nil page:self.currentPage];
     if (self.currentPage && self.cancelManagerOperation) self.cancelManagerOperation(nil,self.currentPage);
     self.currentPage=nil; for (NSURLSessionTask *task in self.network.allValues) [task cancel]; [self.network removeAllObjects];
+    [self updateProcessPolicy];
 }
 - (void)webView:(WKWebView *)webView didFinishNavigation:(WKNavigation *)navigation { [self applyGeometry]; [self setPaused:self.paused]; }
 - (void)webView:(WKWebView *)webView decidePolicyForNavigationAction:(WKNavigationAction *)action decisionHandler:(void (^)(WKNavigationActionPolicy))handler {
@@ -385,6 +403,7 @@ static CGFloat QPOrientationAngle(UIInterfaceOrientation orientation) {
 }
 - (void)webContentTerminated:(WKWebView *)webView reason:(NSInteger)reason {
     [self cancelTextInput:nil page:self.currentPage];
+    [self.processPolicy updateWithWebView:webView active:NO];
     NSArray *reasons=@[@"memory-limit",@"cpu-limit",@"client-request",@"crash"];
     NSString *kind=reason>=0 && reason<(NSInteger)reasons.count ? reasons[reason] : @"unknown";
     self.crashes++; if (self.statusChanged) self.statusChanged(@{@"state":@"error",@"message":[@"WebContent exited: " stringByAppendingString:kind],@"webContentTerminationReason":kind,@"crashes":@(self.crashes)});
@@ -396,6 +415,7 @@ static CGFloat QPOrientationAngle(UIInterfaceOrientation orientation) {
 - (void)invalidate {
     [self cancelTextInput:nil page:nil];
     self.invalidated=YES; [self.session invalidateAndCancel]; [self.network removeAllObjects]; [self.webView stopLoading];
+    [self.processPolicy invalidate];
     [self.webView.configuration.userContentController removeScriptMessageHandlerForName:@"qqpet"];
     [self.pointerIDs removeAllObjects]; self.flushCompletion=nil; [self.flushWaiters removeAllObjects]; [self.deferredManagerRequests removeAllObjects];
 }

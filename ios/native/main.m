@@ -197,7 +197,7 @@ static QPAppDelegate *QPDelegate;
     } else if (self.pendingReply && NSDate.date.timeIntervalSince1970>=self.pendingDeadline)
         [self finishPendingUI:nil error:self.pendingAcknowledged?@"The manager stopped responding while the action was open. Reopen QQPet and retry; canonical save data is retained.":@"The manager did not accept the action within 30 seconds. Open QQPet and retry."];
     static NSTimeInterval wrote=0;
-    if (NSDate.date.timeIntervalSince1970-wrote>=1) { wrote=NSDate.date.timeIntervalSince1970; QPWriteStatus(); }
+    if (NSDate.date.timeIntervalSince1970-wrote>=1) { wrote=NSDate.date.timeIntervalSince1970; [self.host updateProcessPolicy]; QPWriteStatus(); }
 }
 - (void)finishPendingUI:(id)value error:(NSString *)error {
     NSString *token=self.pendingUI; void (^reply)(id,NSString *)=self.pendingReply;

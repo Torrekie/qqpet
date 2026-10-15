@@ -13,18 +13,6 @@
 - (BOOL)_isBackground;
 @end
 
-// Safari 610 / 612: standalone HUDs do not need the UI App's expiring
-// background task coupled to their WebContent process assertions.
-// https://github.com/WebKit/WebKit/blob/Safari-610.1.28.1.9/Source/WebKit/UIProcess/API/Cocoa/_WKProcessPoolConfiguration.h
-// https://github.com/WebKit/WebKit/blob/Safari-612.1.29.41.4/Source/WebKit/UIProcess/ProcessThrottler.cpp
-@protocol QPHUDProcessPoolConfiguration <NSObject>
-- (void)setShouldTakeUIBackgroundAssertion:(BOOL)enabled;
-- (BOOL)shouldTakeUIBackgroundAssertion;
-@end
-@interface WKProcessPool (QPHUDProcessPool)
-- (instancetype)_initWithConfiguration:(id<QPHUDProcessPoolConfiguration>)configuration __attribute__((objc_method_family(init)));
-@end
-
 static NSString *QPJSON(id value) {
     NSData *data = [NSJSONSerialization dataWithJSONObject:value ?: NSNull.null options:NSJSONWritingFragmentsAllowed error:NULL];
     return data ? [[NSString alloc] initWithData:data encoding:NSUTF8StringEncoding] : @"null";
@@ -86,8 +74,6 @@ static CGFloat QPOrientationAngle(UIInterfaceOrientation orientation) {
 @property(nonatomic, strong) NSMutableArray *flushWaiters;
 @property(nonatomic, strong) NSMutableSet<NSString *> *deferredManagerRequests;
 @property(nonatomic, strong) QPMemoryPolicy *processPolicy;
-@property(nonatomic) BOOL hudProcessPoolSupported;
-@property(nonatomic) BOOL hudProcessPoolApplied;
 @property(nonatomic, strong) QPAudioOutput *audioOutput;
 @property(nonatomic) NSUInteger audioGeneration;
 @property(nonatomic, copy) NSDictionary *lastProcessPolicy;
@@ -134,21 +120,6 @@ static CGFloat QPOrientationAngle(UIInterfaceOrientation orientation) {
     [self.cropView addSubview:self.viewport];
     WKWebViewConfiguration *config=[WKWebViewConfiguration new];
     config.allowsInlineMediaPlayback=YES; config.mediaTypesRequiringUserActionForPlayback=WKAudiovisualMediaTypeNone;
-    if ([self.role isEqual:@"pet"]) {
-        Class poolConfigurationClass=NSClassFromString(@"_WKProcessPoolConfiguration");
-        self.hudProcessPoolSupported=poolConfigurationClass&&
-            [poolConfigurationClass instancesRespondToSelector:@selector(setShouldTakeUIBackgroundAssertion:)]&&
-            [poolConfigurationClass instancesRespondToSelector:@selector(shouldTakeUIBackgroundAssertion)]&&
-            [WKProcessPool instancesRespondToSelector:@selector(_initWithConfiguration:)];
-        if (self.hudProcessPoolSupported) {
-            id<QPHUDProcessPoolConfiguration> poolConfiguration=[[poolConfigurationClass alloc] init];
-            [poolConfiguration setShouldTakeUIBackgroundAssertion:NO];
-            if (poolConfiguration&&![poolConfiguration shouldTakeUIBackgroundAssertion]) {
-                WKProcessPool *pool=[[WKProcessPool alloc] _initWithConfiguration:poolConfiguration];
-                if (pool) { config.processPool=pool; self.hudProcessPoolApplied=YES; }
-            }
-        }
-    }
     self.audioOutput=[QPAudioOutput new];
     [self.audioOutput setHostPaused:self.paused];
     // Apply before Ruffle in every document, including its separate SWF frames.
@@ -220,7 +191,6 @@ static CGFloat QPOrientationAngle(UIInterfaceOrientation orientation) {
         @"isBackgroundSupported":@(supportsBackground),
         @"isBackground":supportsBackground?@(self.webView._isBackground):(id)NSNull.null,
         @"applicationState":applicationStateName,@"applicationStateRaw":@(applicationState),
-        @"uiBackgroundAssertionOverride":@{@"requestedDisabled":@([self.role isEqual:@"pet"]),@"supported":@(self.hudProcessPoolSupported),@"applied":@(self.hudProcessPoolApplied)},
         @"bounds":QPRectState(self.webView.bounds),
         @"scrollViewBounds":QPRectState(self.webView.scrollView.bounds),@"zoomScale":@(self.webView.scrollView.zoomScale),
         @"cssSize":QPSizeState(self.cssSize),@"crop":QPRectState(self.crop),

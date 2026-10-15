@@ -34,7 +34,14 @@ const pen = probe.getContext('2d')!
  */
 const movies = new Map<string, { part: Box | null; known: boolean }>()
 /** Per player: the movie it shows, since when without a break, and the last look. */
-let shows = new WeakMap<Element, { url: string; since: number; seen: number; at: number; part: Box | null }>()
+let shows = new WeakMap<Element, { url: string; since: number; seen: number; at: number; part: Box | null | undefined }>()
+let readbackFailures = 0
+let lastReadbackMs: number | null = null
+
+/** Sample attempts are measured without adding a timer or another canvas read. */
+export function coverageTiming(): { readbackFailures: number; lastReadbackMs: number | null } {
+  return { readbackFailures, lastReadbackMs }
+}
 
 /** A host pause interrupts observation; keep learned movie bounds but restart each player's elapsed clock. */
 export function resetCoverage(): void {
@@ -79,8 +86,14 @@ function drawn(player: RufflePlayerElement, box: DOMRect): Box | null {
   if (!s || s.url !== url || now - s.seen > GAP_MS) shows.set(player, (s = { url, since: now, seen: now, at: 0, part: null }))
   s.seen = now
   if (now - s.at > LOOK_MS) {
-    try { [s.at, s.part] = [now, look(canvas)] } catch { return box }
+    // Failed GPU/Canvas reads must obey the same retry interval as successful
+    // ones, and must not reuse a narrow bound from an earlier animation frame.
+    s.at = now
+    try { s.part = look(canvas) }
+    catch { s.part = undefined; readbackFailures++ }
+    finally { lastReadbackMs = Math.round(Math.max(0, performance.now() - now) * 100) / 100 }
   }
+  if (s.part === undefined) return box
   // A one-frame movie is drawn by its script (the mood "+5"): what it drew before says nothing about what comes next.
   const p = meta.numFrames > 1 ? learn(url, s.part, now - s.since >= (meta.numFrames / meta.frameRate) * 1000) : s.part
   if (p === undefined) return box

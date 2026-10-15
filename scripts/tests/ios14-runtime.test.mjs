@@ -257,6 +257,54 @@ test('overlay visibility honors ancestor opacity and an explicitly visible child
   assert.equal(visibleContent(el), false)
 })
 
+test('failed overlay readback stays conservative, throttles retries and recovers its sampled bounds', () => {
+  let clock = 1000
+  let attempts = 0
+  let fail = false
+  const pixels = new Uint8ClampedArray(64 * 64 * 4)
+  pixels[(20 * 64 + 20) * 4 + 3] = 255
+  const pen = {
+    clearRect() {},
+    drawImage() { attempts++; clock += 3; if (fail) throw new Error('Canvas readback unavailable') },
+    getImageData: () => ({ data: pixels }),
+  }
+  class Canvas { getContext() { return pen } }
+  const box = { left: 10, top: 20, right: 210, bottom: 220, width: 200, height: 200 }
+  const player = {
+    id: '', tagName: 'RUFFLE-PLAYER', dataset: { swf: 'animated.swf' },
+    getBoundingClientRect: () => box, closest: () => ({}), matches: () => false,
+    shadowRoot: { querySelector: () => ({}) }, ruffle: () => ({ metadata: { numFrames: 1, frameRate: 12 } }),
+  }
+  const context = {
+    document: { createElement: () => new Canvas() }, HTMLCanvasElement: Canvas,
+    visibleContent: () => true, performance: { now: () => clock },
+  }
+  const source = readFileSync(new URL('../../src/mobile/overlay.ts', import.meta.url), 'utf8')
+  runInNewContext(stripTypeScriptTypes(source.replace(/^import .*$/gm, '').replace(/export (?=interface|function)/g, '')) + '\nthis.cover=cover;this.coverageTiming=coverageTiming', context)
+  assert.notEqual(context.cover(player), box, 'the successful sample finds a narrower painted region')
+  assert.equal(attempts, 1)
+  assert.equal(context.coverageTiming().lastReadbackMs, 3)
+
+  fail = true
+  clock = 1200
+  assert.equal(context.cover(player), box)
+  for (clock = 1216; clock < 1350; clock += 16) assert.equal(context.cover(player), box, 'failure must not reuse the earlier narrow sample')
+  assert.equal(attempts, 2, 'adjacent animation frames must not repeat a failed readback')
+  assert.equal(context.coverageTiming().readbackFailures, 1)
+  clock = 1351
+  assert.equal(context.cover(player), box)
+  assert.equal(attempts, 3)
+  assert.equal(context.coverageTiming().readbackFailures, 2)
+
+  fail = false
+  clock = 1367
+  assert.equal(context.cover(player), box, 'recovery also waits for the retry interval')
+  clock = 1502
+  assert.notEqual(context.cover(player), box)
+  assert.equal(attempts, 4)
+  assert.equal(context.coverageTiming().readbackFailures, 2)
+})
+
 test('Ruffle wrapper freezes its frame clock, keeps first-load callbacks, and cancels destroyed waits', async () => {
   const saved = Object.fromEntries(['window', 'document', 'location', 'MutationObserver', 'performance'].map(key => [key, globalThis[key]]))
   let now = 0

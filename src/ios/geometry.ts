@@ -1,9 +1,9 @@
-import { cover, resetCoverage, type Box } from '../mobile/overlay'
+import { cover, coverageTiming, resetCoverage, type Box } from '../mobile/overlay'
 import type { IOSRPC } from './rpc'
 
 export interface Rect { x: number; y: number; width: number; height: number }
 export interface PetPointer { phase: 'begin' | 'move' | 'end' | 'cancel'; id: number; x: number; y: number; time?: number }
-interface GeometryTiming { framesPerSecond: number; lastFrameAgoMs: number | null; maxFrameGapMs: number }
+interface GeometryTiming { framesPerSecond: number; lastFrameAgoMs: number | null; maxFrameGapMs: number; readbackFailures: number; lastReadbackMs: number | null }
 
 const rect = (box: Box): Rect => ({ x: box.left, y: box.top, width: box.right - box.left, height: box.bottom - box.top })
 const visible = (element: Element): boolean => {
@@ -97,7 +97,7 @@ export function startGeometry(rpc: IOSRPC): { pointer(input: PetPointer): void; 
   return {
     pointer,
     bounds: () => bounds,
-    timing: () => ({ framesPerSecond, lastFrameAgoMs: lastFrame === null ? null : Math.round(performance.now() - lastFrame), maxFrameGapMs: Math.round(maxFrameGapMs) }),
+    timing: () => ({ framesPerSecond, lastFrameAgoMs: lastFrame === null ? null : Math.round(performance.now() - lastFrame), maxFrameGapMs: Math.round(maxFrameGapMs), ...coverageTiming() }),
     pause(value) {
       if (paused !== value) {
         resetCoverage()

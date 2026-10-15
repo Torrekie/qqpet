@@ -428,12 +428,15 @@ static CGFloat QPOrientationAngle(UIInterfaceOrientation orientation) {
     [self webContentTerminated:webView reason:reason];
 }
 - (void)webContentTerminated:(WKWebView *)webView reason:(NSInteger)reason {
+    NSTimeInterval at=NSDate.date.timeIntervalSince1970;
     self.audioGeneration++; [self.audioOutput reset];
     [self cancelTextInput:nil page:self.currentPage];
     [self.processPolicy updateWithWebView:webView active:NO];
     NSArray *reasons=@[@"memory-limit",@"cpu-limit",@"client-request",@"crash"];
     NSString *kind=reason>=0 && reason<(NSInteger)reasons.count ? reasons[reason] : @"unknown";
-    self.crashes++; if (self.statusChanged) self.statusChanged(@{@"state":@"error",@"message":[@"WebContent exited: " stringByAppendingString:kind],@"webContentTerminationReason":kind,@"crashes":@(self.crashes)});
+    self.crashes++;
+    NSDictionary *exit=@{@"at":@(at),@"reason":kind,@"rawReason":@(reason),@"paused":@(self.paused),@"crashes":@(self.crashes),@"role":self.role};
+    if (self.statusChanged) self.statusChanged(@{@"state":@"error",@"message":[@"WebContent exited: " stringByAppendingString:kind],@"webContentTerminationReason":kind,@"crashes":@(self.crashes),@"lastWebContentExit":exit});
     if (self.crashes<=3&&!self.invalidated) [webView reload];
 }
 - (UIInterfaceOrientationMask)supportedInterfaceOrientations { return [self.role isEqual:@"pet"]?UIInterfaceOrientationMaskPortrait:UIInterfaceOrientationMaskAll; }

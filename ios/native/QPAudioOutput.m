@@ -100,6 +100,7 @@ static NSString *QPAudioReleaseSession(QPAudioContext *context) {
 @property(nonatomic) uint64_t submittedFrames;
 @property(nonatomic) uint64_t nonSilentBuffers;
 @property(nonatomic, copy) NSString *lastError;
+@property(nonatomic) NSTimeInterval lastErrorAt;
 - (void)completedBuffer:(AudioQueueBufferRef)buffer queue:(AudioQueueRef)queue context:(QPAudioContext *)context;
 @end
 
@@ -174,13 +175,17 @@ static void QPAudioOutputCallback(void *userData, AudioQueueRef queue, AudioQueu
         status[@"sessionLeases"] = @(QPAudioSessionLeases);
         status[@"deactivationPending"] = @(QPAudioDeactivationPending);
     }
-    if (self.lastError) status[@"lastError"] = self.lastError;
+    if (self.lastError) {
+        status[@"lastError"] = self.lastError;
+        status[@"lastErrorAt"] = @(self.lastErrorAt);
+    }
     @synchronized (self) { self.snapshot = status; }
 }
 
 - (void)recordError:(NSString *)error {
     self.errors++;
     self.lastError = error;
+    self.lastErrorAt = NSDate.date.timeIntervalSince1970;
 }
 
 - (NSString *)state:(QPAudioContext *)context {

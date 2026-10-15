@@ -8,6 +8,7 @@ import { TRAY_STATES, trayTip } from '../shared/tray'
 import { latestRelease } from '../shared/update'
 import { weather } from '../shared/weather'
 import { gameRewards } from './game-rewards'
+import { readRufflePanic } from './diagnostics'
 import { startGeometry, type PetPointer } from './geometry'
 import { IOSRPC } from './rpc'
 import { IOSSaveWriter } from './save-writer'
@@ -103,7 +104,18 @@ function reportError(operation: string, error: unknown): void {
 function command(op: string, args: Record<string, unknown> = {}): void {
   void rpc.request(op, args).catch((error) => reportError(op, error))
 }
+let publishedRufflePanic = false
+function publishRufflePanic(): void {
+  if (publishedRufflePanic) return
+  const panic = readRufflePanic(document)
+  if (!panic) return
+  try {
+    rpc.notify('status', { lastRufflePanic: { ...panic, observedAt: Date.now() / 1000, page: rpc.page } })
+    publishedRufflePanic = true
+  } catch { /* Retry at the next existing status/error event if publication failed. */ }
+}
 function savedStatus(): void {
+  publishRufflePanic()
   if (!model) return
   const pet = model.petInfo
   const element = document.getElementById('pet')
@@ -127,8 +139,9 @@ function savedStatus(): void {
   }) } catch (error) { reportError('status', error) }
 }
 window.addEventListener('qqpet-swf-error', (event) => {
+  publishRufflePanic()
   const detail = (event as CustomEvent<{ url: string; message: string }>).detail
-  try { rpc.notify('status', { lastSWFError: detail }) } catch { /* A disconnected page cannot publish diagnostics. */ }
+  try { rpc.notify('status', { lastSWFError: { ...detail, observedAt: Date.now() / 1000, page: rpc.page } }) } catch { /* A disconnected page cannot publish diagnostics. */ }
 })
 function requireOwner(): { save: SaveData; persistence: IOSSaveWriter } {
   if (gamePage || !model || !writer) throw new Error('Only the initialized pet page can change its save.')

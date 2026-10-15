@@ -31,7 +31,9 @@ test('variant picks by index and returns null without variants', () => {
   assert.equal(variant('GG', 'Kid', 'dirty', () => 1), 'lead/dirty20110805')
   assert.equal(variant('GG', 'Kid', 'poor', () => 0), 'Poor')
   assert.equal(variant('MM', 'Kid', 'dirty'), null)
-  assert.equal(variant('GG', 'Adult', 'drag'), null)
+  assert.equal(variant('GG', 'Egg', 'drag'), null)
+  assert.equal(variant('GG', 'Kid', 'drag'), null)
+  for (let i = 0; i < 3; i++) assert.equal(variant('GG', 'Adult', 'drag', () => i), `motion/drag${i + 1}101213`)
 })
 
 test('walk URLs exist for every sex/stage/direction, MM keeps the single gait', () => {

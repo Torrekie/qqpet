@@ -2,7 +2,7 @@ import { createPetInput, type PetPointerInput } from './pet/input'
 import { clipAsk, IDLE, note } from './pet/ai'
 import { resumeTask } from './pet/jobs'
 import { machine, speak, startPet } from './pet/pet'
-import { applyEdge, info, onInfoChange, petSize, save, setInfo, stage, update } from './pet/store'
+import { applyEdge, info, onInfoChange, petSize, save, setInfo, update } from './pet/store'
 import type { DesktopCursor } from '../shared/ipc'
 import { pageZoom, setDesktopSize, viewportSize } from './ui/viewport'
 import { adopt } from './ui/adopt'
@@ -35,6 +35,7 @@ window.addEventListener('qqpet-platform-error', (event) => {
 const petEl = document.getElementById('pet')!
 const HOLD_MS = 500
 let dragging = false
+let dragLifted = false
 let desktopOffset = { x: 0, y: 0 }
 let desktopSequence = 0
 let dragMove: ((point: DesktopCursor) => void) | null = null
@@ -125,7 +126,12 @@ window.API = {
   GetWindowRect: () => `${info.lastX},${info.lastY},${size},${size}`,
   // No PetEden.ini: every key reads as its default, as the Windows call does for a missing file.
   GetPrivateProfileString: (_section, _key, fallback) => fallback,
+  // Release positioning and flings belong to the host. An outgoing movie may
+  // still run its drop frames while the replacement loads.
+  MoveBy: () => {},
 }
+// The newer drag movies loop their nested timeline while this value is 1.
+window.DataCenter_ReadInt32 = (key) => key === 'drag' && dragLifted ? 1 : 0
 
 // The window is click-through except while the cursor is over a [data-hit]
 // element (or a drag is in progress).
@@ -201,14 +207,13 @@ const petInput = createPetInput({
     if (save.settings.petBar) showControl()
     catchDiudiule()
   },
-  active: (on) => { dragging = on; if (!on) releaseDomInput() },
+  active: (on) => {
+    dragging = on
+    if (!on) { dragLifted = false; releaseDomInput() }
+  },
   hold: (x, y) => openMenu({ x, y, pet: true }, adoptPet),
-  lift: (s) => {
-    // Preserve upstream: Adult uses the scruff; Egg/Kid keep their stage/sex and original grab point.
-    if (stage() === 'Adult') {
-      machine.play({ a: 'drag', opt: { url: 'pet/Action/drag.swf', opt: {} } })
-      return { dx: s * 0.73, dy: s * 0.14 }
-    }
+  lift: () => {
+    dragLifted = true
     machine.play({ a: 'drag' })
     return null
   },

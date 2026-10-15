@@ -14,7 +14,9 @@ declare global {
     __qqpetHostPaused?: boolean
     RufflePlayer: { newest(): { createPlayer(): RufflePlayerElement } }
     /** Called by pet action SWFs (Stand and edge-peek eyes follow the cursor; scripts/swf-eyes.py). Values are "x,y,0" / "x,y,w,h". The community reads its ini through it. */
-    API: { GetCursorPosition(): string; GetWindowRect(): string; GetPrivateProfileString(section: string, key: string, fallback: string, file: string): string }
+    API: { GetCursorPosition(): string; GetWindowRect(): string; GetPrivateProfileString(section: string, key: string, fallback: string, file: string): string; MoveBy(dx: number, dy: number): void }
+    /** Newer drag SWFs read the host's actual lifted state (1/0). */
+    DataCenter_ReadInt32(key: string): number
     /** Called by talk.swf when a bubble button is clicked. */
     BubbleAPI: { OnButtonClick(i: number): void }
     /** Called by reset/Adopt.swf: 0 GG, 1 MM. */

@@ -7,14 +7,14 @@ import { route } from '../../src/renderer/pet/router.ts'
 import { createPetInput } from '../../src/renderer/pet/input.ts'
 import { resizePetPosition } from '../../src/shared/layout.ts'
 
-test('drag keeps the stage, sex and adult mood, using an available standing clip', () => {
+test('drag uses matching adult GG variants and otherwise keeps the stage, sex and mood', () => {
   for (const sex of ['GG', 'MM']) {
     for (const stage of ['Egg', 'Kid', 'Adult']) {
       for (const mood of ['happy', 'peaceful', 'upset', 'sad']) {
         const target = route(sex, stage, 'drag', mood)
         const expected = `pet/Action/${sex}/${stage}/${stage === 'Adult' ? `${mood}/` : ''}Stand.swf`
-        // GG Egg/Kid pick one of the newer client's drag poses instead (#25).
-        if (sex === 'GG' && stage !== 'Adult') assert.match(target.url, new RegExp(`^pet/Action/GG/${stage}/motion/drag\\d101213\\.swf$`))
+        // Imported younger-stage drag movies draw adult GG as well.
+        if (sex === 'GG' && stage === 'Adult') assert.match(target.url, /^pet\/Action\/GG\/Adult\/motion\/drag[123]101213\.swf$/)
         else assert.equal(target.url, expected)
         assert.ok(existsSync(new URL(`../../resources/${target.url}`, import.meta.url)), target.url)
       }
@@ -133,6 +133,8 @@ export function renderer(size, crop = { x: 0, y: 0 }, native = null, stage = 'Eg
   }
   return {
     info, poses, releases, pointer, save: services.save,
+    readInt: key => services.window.DataCenter_ReadInt32(key),
+    movieMove: (dx, dy) => services.window.API.MoveBy(dx, dy),
     windowPointer: (type, x, y) => pointer(type, x, y, windowEvents),
     pause: () => { services.window.__qqpetHostPaused = true; services.window.__qqpetInput({ phase: 'cancel', id: -1, x: 0, y: 0 }) },
     cursor: point => { clock += 16; cursorListener(point) },
@@ -164,7 +166,7 @@ export function renderer(size, crop = { x: 0, y: 0 }, native = null, stage = 'Eg
   }
 }
 
-for (const stage of ['Egg', 'Kid']) test(`${stage} drag keeps the original grab point at different sizes and offsets`, () => {
+for (const stage of ['Egg', 'Kid', 'Adult']) test(`${stage} drag keeps the original grab point at different sizes and offsets`, () => {
   for (const size of [96, 144, 164]) {
     for (const [offsetX, offsetY] of [[0.1, 0.2], [0.5, 0.5], [0.9, 0.85]]) {
       const { info, poses, pointer } = renderer(size, { x: 0, y: 0 }, null, stage)
@@ -189,22 +191,32 @@ for (const stage of ['Egg', 'Kid']) test(`${stage} drag keeps the original grab 
   }
 })
 
-test('adult drag uses the upstream scruff animation and anchors the held head under the cursor', () => {
-  for (const size of [96, 144, 164]) {
-    const { info, poses, pointer } = renderer(size, { x: 320, y: 100 }, null, 'Adult')
-    pointer('pointerdown', 550, 340)
-    pointer('pointermove', 555, 340)
-    assert.equal(poses.length, 0)
-    pointer('pointermove', 580, 365)
-    assert.equal(poses[0].opt.url, 'pet/Action/drag.swf')
-    assert.ok(Math.abs(info.lastX + size * 0.73 - 580) < 1e-8)
-    assert.ok(Math.abs(info.lastY + size * 0.14 - 365) < 1e-8)
-    pointer('pointermove', 610, 385)
-    assert.ok(Math.abs(info.lastX + size * 0.73 - 610) < 1e-8)
-    assert.ok(Math.abs(info.lastY + size * 0.14 - 385) < 1e-8)
-    pointer('pointerup', 610, 385)
-    assert.equal(poses.at(-1).a, 'normal')
-  }
+test('drag movies see the lift threshold and release without moving the host a second time', () => {
+  const app = renderer(144)
+  assert.equal(app.readInt('drag'), 0)
+  assert.equal(app.readInt('unknown'), 0)
+  app.pointer('pointerdown', 550, 340)
+  app.pointer('pointermove', 555, 340)
+  assert.equal(app.readInt('drag'), 0, 'a press alone must not enter the held loop')
+  app.pointer('pointermove', 580, 365)
+  assert.equal(app.readInt('drag'), 1)
+  app.pointer('pointerup', 580, 365)
+  assert.equal(app.readInt('drag'), 0)
+  const position = { ...app.info }
+  app.movieMove(0, 10)
+  assert.deepEqual(app.info, position, 'outgoing drop frames cannot shift the new pose')
+
+  app.pointer('pointerdown', 580, 365)
+  app.pointer('pointermove', 610, 385)
+  assert.equal(app.readInt('drag'), 1)
+  app.pointer('pointercancel', 610, 385)
+  assert.equal(app.readInt('drag'), 0)
+
+  app.pointer('pointerdown', 610, 385)
+  app.pointer('pointermove', 640, 410)
+  assert.equal(app.readInt('drag'), 1)
+  app.pause()
+  assert.equal(app.readInt('drag'), 0)
 })
 
 test('drag coordinates account for the cropped mobile overlay', () => {

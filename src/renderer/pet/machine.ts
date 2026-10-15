@@ -16,6 +16,10 @@ export interface Pose {
 /** At health 1 everything except these turns into the dying animation. */
 const DYING_ALLOWED = ['cure', 'die', 'revival', 'hide', 'appear', 'enter']
 
+function effectiveAction(p: Pose): string {
+  return info.health === 1 && !DYING_ALLOWED.includes(p.a) ? 'dying' : p.a
+}
+
 /**
  * Pose sequencer, polled at the SWF frame rate like the original. A pose ends
  * on its last frame; single-frame poses (Stand, Die) and "normal" hold until
@@ -27,6 +31,7 @@ export class Machine {
   private queue: Pose[] = []
   private next: Pose | null = null
   private changing = false
+  private revision = 0
   private since = 0
 
   constructor(
@@ -45,6 +50,10 @@ export class Machine {
   }
 
   play(p: Pose): void {
+    // A forbidden request may become valid after the current transition, but
+    // must not cancel an allowed transition such as Die -> Revival.
+    const action = effectiveAction(p)
+    if (!this.poseOpt?.afterState || this.poseOpt.afterState.includes(action)) this.revision++
     this.next = p
   }
 
@@ -61,23 +70,25 @@ export class Machine {
     if (!this.next && holding) return
 
     const p = this.next ?? this.queue.shift() ?? { a: applyEdge() ?? 'normal' }
-    if (info.health === 1 && !DYING_ALLOWED.includes(p.a)) p.a = 'dying'
+    p.a = effectiveAction(p)
     if (this.poseOpt?.afterState && !this.poseOpt.afterState.includes(p.a)) return
     if (this.next) this.queue = []
     this.next = null
     this.changing = true
 
+    const revision = this.revision
     const target = p.opt ?? route(info.sex, stage(), p.a, mood())
-    this.poseOpt = target.opt.opt
-    void this.swf.load(target.url).then(() => {
+    void this.swf.load(target.url, () => this.revision === revision).then((swapped) => {
+      this.changing = false
+      if (!swapped) return
       const over = this.pose
       this.pose = p
+      this.poseOpt = target.opt.opt
       this.since = Date.now()
-      this.changing = false
       this.onChange(over, p)
     }).catch(() => {
       this.changing = false
-      if (p.a !== 'normal') this.next = { a: 'normal' }
+      if (!this.next && p.a !== 'normal') this.next = { a: 'normal' }
     })
   }
 }

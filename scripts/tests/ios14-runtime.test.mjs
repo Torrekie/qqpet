@@ -95,6 +95,18 @@ test('pet swaps after paint, retires the previous runtime and preserves its fron
   assert.equal(instances[4].url, undefined)
   assert.equal(instances[4].muted, true)
   assert.equal(instances.filter(movie => movie.url && !movie.destroyed).length, 1)
+
+  let current = true
+  const stale = pet.load('released-drag.swf', () => current)
+  await instances[4].waitingForPaint
+  current = false
+  instances[4].paint()
+  assert.equal(await stale, false, 'a superseded movie must not swap even after it paints')
+  assert.equal(pet.front, instances[3])
+  assert.equal(pet.front.destroyed, undefined)
+  assert.equal(pet.front.el.style.opacity, '1')
+  assert.equal(instances[4].destroyed, true)
+  assert.equal(instances[5].url, undefined, 'the next request gets a fresh empty back')
 })
 
 test('JSON bridge clones remain independent and greeting search preserves its source', () => {

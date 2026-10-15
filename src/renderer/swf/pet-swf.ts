@@ -47,13 +47,20 @@ export class PetSwf {
     this.back.setMuted(muted)
   }
 
-  async load(url: string): Promise<void> {
+  async load(url: string, accept: () => boolean = () => true): Promise<boolean> {
     this.applySound()
     const next = this.back
     try {
       await next.load(url)
       pinCursor(next.el)
       await next.nextPaint()
+      // A drag can end while its movie is loading. Keep the current front
+      // visible until the latest requested pose is ready instead of showing the outdated one.
+      if (!accept()) {
+        next.destroy()
+        if (this.back === next && this.parent.isConnected) this.back = this.createBack()
+        return false
+      }
     } catch (error) {
       next.destroy()
       // Leave the last good front visible. Machine's existing recovery retries in a fresh element.
@@ -66,5 +73,6 @@ export class PetSwf {
     this.front = next
     previous.destroy()
     this.back = this.createBack()
+    return true
   }
 }

@@ -54,7 +54,7 @@ function common(o: { enter?: Range; eat?: Range; exit?: Range; clean?: Range; si
 function moodActions(play: number, speak: Range = { notNum: true }): Table {
   return {
     normal: { name: 'Stand' },
-    // The shared drag.swf is adult-only; younger pets hold their standing pose while dragged.
+    // Keep the pet's own appearance when no matching drag artwork is available.
     drag: { name: 'Stand' },
     play: { name: 'play/P', start: 1, end: play },
     speak: { name: 'Speak', start: 1, end: speak.end ?? 1, notNum: speak.notNum },
@@ -110,7 +110,6 @@ export const ACTIONS: Record<Sex, ActionData> = {
     variants: {
       Egg: {
         ...walks(2),
-        drag: DRAG([1, 2, 3]),
         hideleft: ['Hide_left1', 'motion/hide_left130906'],
         hideright: ['Hide_right1', 'motion/hide_right130906'],
         look_left: ['walk/lplay'],
@@ -118,12 +117,12 @@ export const ACTIONS: Record<Sex, ActionData> = {
       },
       Kid: {
         ...walks(3),
-        drag: DRAG([1, 3]),
         dirty: ['Dirty', 'lead/dirty20110805'],
         poor: ['Poor', 'lead/poor20110826'],
         ...looks(),
       },
-      Adult: { ...walks(3), hideright: ['Hide_right1', 'motion/hide_right130906'], ...looks() },
+      // The imported Egg/Kid motion/drag movies also draw adult GG, despite their directory names.
+      Adult: { ...walks(3), drag: DRAG([1, 2, 3]), hideright: ['Hide_right1', 'motion/hide_right130906'], ...looks() },
     },
     extraPlay: {
       Egg: [{ clip: 'motion/003', single: true }, { clip: 'turn/ctoe' }],
@@ -178,8 +177,8 @@ export function route(sex: Sex, stage: Stage, action: string, mood: Mood): Targe
     const extra = extraPlay(sex, stage, r.end ?? 0)
     if (extra) return { url: `pet/Action/${sex}/${stage}/${extra.clip}.swf`, opt: { ...r, opt: extra.single ? { holdMs: SINGLE_FRAME_HOLD } : undefined } }
   }
-  const alt = stage === 'Adult' && BY_MOOD.includes(action) ? null : variant(sex, stage, action)
-  if (alt) return { url: `${dir}${alt}.swf`, opt: r }
+  const alt = stage === 'Adult' && BY_MOOD.includes(action) && action !== 'drag' ? null : variant(sex, stage, action)
+  if (alt) return { url: `pet/Action/${sex}/${stage}/${alt}.swf`, opt: r }
   const n = r.start && r.end && !r.notNum ? Math.trunc(Math.random() * r.end + r.start) : ''
   return { url: `${dir}${r.name}${n}.swf`, opt: r }
 }

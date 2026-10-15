@@ -101,18 +101,21 @@ for (const stage of ['Egg', 'Kid', 'Adult']) test(`${stage} drag keeps its hold 
     return p
   }
   const app = renderer(144, { x: 0, y: 0 }, native, stage)
-  const anchorX = 50 / 144
-  const anchorY = 40 / 144
+  const anchorX = stage === 'Adult' ? 0.58 : 50 / 144
+  const anchorY = stage === 'Adult' ? 0.30 : 40 / 144
   await setImmediate()
   app.pointer('pointerdown', 550, 340)
   await setImmediate()
   d.move({ x: -100, y: 100 })
   const p = position(true)
   app.cursor(p)
+  app.startPose()
+  app.advance(120)
   const smallSize = 144 * 1280 / 1920
   assert.ok(Math.abs(app.info.lastX - (p.x - anchorX * smallSize)) < 1e-8)
   assert.ok(Math.abs(app.info.lastY - (p.y - anchorY * smallSize)) < 1e-8)
-  assert.equal(app.poses[0].opt, undefined, 'every stage uses the routed drag artwork')
+  if (stage === 'Adult') assert.equal(app.poses[0].opt.url, 'pet/Action/drag.swf')
+  else assert.equal(app.poses[0].opt, undefined, 'younger stages use their own artwork')
   assert.equal(app.save.settings.petDisplayId, 2)
   d.move({ x: 600, y: -600 })
   const top = position(true)

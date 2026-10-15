@@ -7,15 +7,13 @@ import { route } from '../../src/renderer/pet/router.ts'
 import { createPetInput } from '../../src/renderer/pet/input.ts'
 import { resizePetPosition } from '../../src/shared/layout.ts'
 
-test('drag uses matching adult GG variants and otherwise keeps the stage, sex and mood', () => {
+test('drag fallback keeps the stage, sex and mood', () => {
   for (const sex of ['GG', 'MM']) {
     for (const stage of ['Egg', 'Kid', 'Adult']) {
       for (const mood of ['happy', 'peaceful', 'upset', 'sad']) {
         const target = route(sex, stage, 'drag', mood)
         const expected = `pet/Action/${sex}/${stage}/${stage === 'Adult' ? `${mood}/` : ''}Stand.swf`
-        // Imported younger-stage drag movies draw adult GG as well.
-        if (sex === 'GG' && stage === 'Adult') assert.match(target.url, /^pet\/Action\/GG\/Adult\/motion\/drag[123]101213\.swf$/)
-        else assert.equal(target.url, expected)
+        assert.equal(target.url, expected)
         assert.ok(existsSync(new URL(`../../resources/${target.url}`, import.meta.url)), target.url)
       }
     }
@@ -41,10 +39,10 @@ export function renderer(size, crop = { x: 0, y: 0 }, native = null, stage = 'Eg
   let nextFrame = 0
   const frames = new Map()
   const observers = new Set()
-  const flushFrame = () => {
+  const flushFrame = (elapsed = 16) => {
     const pending = [...frames.values()]
     frames.clear()
-    clock += 16
+    clock += elapsed
     for (const callback of pending) callback(clock)
   }
   const noop = () => {}
@@ -137,6 +135,8 @@ export function renderer(size, crop = { x: 0, y: 0 }, native = null, stage = 'Eg
     info, poses, releases, pointer, save: services.save, clickThrough,
     readInt: key => services.window.DataCenter_ReadInt32(key),
     movieMove: (dx, dy) => services.window.API.MoveBy(dx, dy),
+    startPose: () => poses.at(-1)?.s?.(),
+    advance: flushFrame,
     windowPointer: (type, x, y) => pointer(type, x, y, windowEvents),
     pause: () => { services.window.__qqpetHostPaused = true; services.window.__qqpetInput({ phase: 'cancel', id: -1, x: 0, y: 0 }) },
     cursor: point => { clock += 16; cursorListener(point) },
@@ -170,7 +170,7 @@ export function renderer(size, crop = { x: 0, y: 0 }, native = null, stage = 'Eg
   }
 }
 
-for (const stage of ['Egg', 'Kid', 'Adult']) test(`${stage} drag keeps the original grab point at different sizes and offsets`, () => {
+for (const stage of ['Egg', 'Kid']) test(`${stage} drag keeps the original grab point at different sizes and offsets`, () => {
   for (const size of [96, 144, 164]) {
     for (const [offsetX, offsetY] of [[0.1, 0.2], [0.5, 0.5], [0.9, 0.85]]) {
       const { info, poses, pointer } = renderer(size, { x: 0, y: 0 }, null, stage)
@@ -221,6 +221,65 @@ test('drag movies see the lift threshold and release without moving the host a s
   assert.equal(app.readInt('drag'), 1)
   app.pause()
   assert.equal(app.readInt('drag'), 0)
+})
+
+test('adult drag uses the upstream scruff animation and anchors the held head under the cursor', () => {
+  for (const size of [96, 144, 164]) {
+    const { info, poses, pointer, startPose, advance } = renderer(size, { x: 320, y: 100 }, null, 'Adult')
+    pointer('pointerdown', 550, 340)
+    pointer('pointermove', 555, 340)
+    assert.equal(poses.length, 0)
+    pointer('pointermove', 580, 365)
+    assert.equal(poses[0].opt.url, 'pet/Action/drag.swf')
+    assert.equal(info.lastX, 530, 'the standing pose must not jump while the SWF loads')
+    assert.equal(info.lastY, 325)
+    startPose()
+    assert.equal(info.lastX, 530, 'the first lift frame keeps the original grab')
+    advance(60)
+    const targetX = 580 - size * 0.58, targetY = 365 - size * 0.30
+    assert.ok(Math.abs(info.lastX - targetX) < Math.abs(530 - targetX))
+    assert.ok(Math.abs(info.lastY - targetY) < Math.abs(325 - targetY))
+    assert.notEqual(info.lastX, targetX, 'the new anchor must ease in rather than snap')
+    advance(60)
+    assert.ok(Math.abs(info.lastX - targetX) < 1e-8, 'alignment finishes even if the mouse stops')
+    assert.ok(Math.abs(info.lastY - targetY) < 1e-8)
+    pointer('pointermove', 610, 385)
+    assert.ok(Math.abs(info.lastX + size * 0.58 - 610) < 1e-8)
+    assert.ok(Math.abs(info.lastY + size * 0.30 - 385) < 1e-8)
+    pointer('pointerup', 610, 385)
+    assert.equal(poses.at(-1).a, 'normal')
+  }
+})
+
+test('a late lift animation cannot move a released pet or change a new grab', () => {
+  const { info, poses, pointer, advance } = renderer(144, { x: 0, y: 0 }, null, 'Adult')
+  pointer('pointerdown', 550, 340)
+  pointer('pointermove', 580, 365)
+  const lateStart = poses[0].s
+  pointer('pointerup', 580, 365)
+  const released = { ...info }
+  lateStart()
+  advance(120)
+  assert.deepEqual(info, released)
+  pointer('pointerdown', info.lastX + 10, info.lastY + 10)
+  lateStart()
+  pointer('pointermove', released.lastX + 15, released.lastY + 10)
+  assert.equal(info.lastX, released.lastX + 5)
+  assert.equal(info.lastY, released.lastY)
+})
+
+test('cancelling an anchor transition stops further frames without a fling', () => {
+  const { info, pointer, startPose, advance, releases } = renderer(144, { x: 0, y: 0 }, null, 'Adult')
+  pointer('pointerdown', 550, 340)
+  pointer('pointermove', 580, 365)
+  startPose()
+  advance(32)
+  pointer('pointermove', 600, 380)
+  pointer('pointercancel', 600, 380)
+  const cancelled = { ...info }
+  advance(120)
+  assert.deepEqual(info, cancelled)
+  assert.deepEqual(releases.at(-1), [false, 0, 0])
 })
 
 test('drag coordinates account for the cropped mobile overlay', () => {

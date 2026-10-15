@@ -33,7 +33,7 @@ test('variant picks by index and returns null without variants', () => {
   assert.equal(variant('MM', 'Kid', 'dirty'), null)
   assert.equal(variant('GG', 'Egg', 'drag'), null)
   assert.equal(variant('GG', 'Kid', 'drag'), null)
-  for (let i = 0; i < 3; i++) assert.equal(variant('GG', 'Adult', 'drag', () => i), `motion/drag${i + 1}101213`)
+  assert.equal(variant('GG', 'Adult', 'drag'), null)
 })
 
 test('walk URLs exist for every sex/stage/direction, MM keeps the single gait', () => {
@@ -126,4 +126,16 @@ test('younger peeking always keeps its stage-specific artwork', () => {
 test('small-game icons exist', async () => {
   const src = (await import('node:fs')).readFileSync(new URL('../../src/renderer/ui/smallgame.ts', import.meta.url), 'utf8')
   for (const [, icon] of src.matchAll(/icon: '([a-z]+)'/g)) assert.ok(has(`pet/quickBar/TickleSystem/${icon}00.png`), icon)
+})
+
+test('an egg or kid is dragged and peeks from the edge as itself, never with the adult clips (#43)', async () => {
+  const { route } = await import('../../src/renderer/pet/router.ts')
+  for (const sex of ['GG', 'MM'])
+    for (const stage of ['Egg', 'Kid'])
+      for (let i = 0; i < 30; i++)
+        for (const a of ['drag', 'hideleft', 'hideright']) {
+          const { url } = route(sex, stage, a, 'happy')
+          assert.ok(url.startsWith(`pet/Action/${sex}/${stage}/`), url)
+          assert.doesNotMatch(url, /motion\/(drag\d101213|hide_(left|right)130906)/, url)
+        }
 })

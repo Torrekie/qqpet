@@ -1,6 +1,6 @@
 import { speak } from '../pet/pet'
 import { info, playingDesk, busy, refreshTray, save, setDeskGame, setInfo, stage } from '../pet/store'
-import { BUBBLES, VISIT_DIR, VISIT_STAGE, visitBox, visitSteps } from '../pet/visit-plan'
+import { BUBBLES, VISIT_STAGE, visitBox, visitDir, visitScenes, visitSteps } from '../pet/visit-plan'
 import { SwfPlayer } from '../swf/player'
 import './css/visit.css'
 import { div } from './dom'
@@ -25,6 +25,9 @@ export function visitFriend(): void {
   if (box || playingDesk()) return
   if (stage() === 'Egg') return speak({ s: '[host]，等我破壳了再请朋友来玩吧~', now: true }, 'speak')
   if (busy() || info.health < 5) return speak({ s: '[host]，我现在不方便招待朋友呢~', now: true }, 'speak')
+  const scenes = visitScenes(info.sex, stage())
+  if (!scenes.length) return speak({ s: '[host]，朋友们今天都没空呢~', now: true }, 'speak')
+  const scene = scenes[Math.trunc(Math.random() * scenes.length)]
   const pet = document.getElementById('pet')!
   const r = visitBox(pet.getBoundingClientRect(), innerWidth)
   setDeskGame('visit')
@@ -42,7 +45,7 @@ export function visitFriend(): void {
   box.addEventListener('click', finish)
   document.body.append(box)
   const player = new SwfPlayer(stageEl)
-  const steps = visitSteps(Math.random())
+  const steps = visitSteps(Math.random(), scene)
   const run = (i: number): void => {
     if (!box) return
     const s = steps[i]
@@ -55,7 +58,7 @@ export function visitFriend(): void {
       b.textContent = s.talk ? s.talk[k].replace(/\[host]/g, info.host) : ''
       b.hidden = !s.talk
     })
-    void player.load(VISIT_DIR + s.clip).catch(() => finish())
+    void player.load(visitDir(scene) + s.clip).catch(() => finish())
     timer = window.setTimeout(() => run(i + 1), s.ms)
   }
   run(0)

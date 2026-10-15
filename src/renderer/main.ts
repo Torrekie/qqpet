@@ -2,7 +2,7 @@ import { createPetInput, type PetPointerInput } from './pet/input'
 import { clipAsk, IDLE, note } from './pet/ai'
 import { resumeTask } from './pet/jobs'
 import { machine, speak, startPet } from './pet/pet'
-import { applyEdge, info, onInfoChange, petSize, save, setInfo, update } from './pet/store'
+import { applyEdge, info, onInfoChange, petSize, save, setInfo, stage, update } from './pet/store'
 import type { DesktopCursor } from '../shared/ipc'
 import { pageZoom, setDesktopSize, viewportSize } from './ui/viewport'
 import { adopt } from './ui/adopt'
@@ -208,6 +208,8 @@ petEl.addEventListener('contextmenu', (e) => {
 let releaseDomInput = (): void => {}
 const petInput = createPetInput({
   clock: () => performance.now(),
+  requestFrame: requestAnimationFrame,
+  cancelFrame: cancelAnimationFrame,
   position: () => ({ x: info.lastX, y: info.lastY, size }),
   begin: () => {
     closeMenu()
@@ -219,8 +221,15 @@ const petInput = createPetInput({
     if (!on) { dragLifted = false; releaseDomInput() }
   },
   hold: (x, y) => openMenu({ x, y, pet: true }, adoptPet),
-  lift: () => {
+  lift: (s, align) => {
     dragLifted = true
+    if (stage() === 'Adult') {
+      // Hold the upper-right rim of the head, so the finger lifts it from the side.
+      // Keep following the original grab until the double-buffered SWF is on screen.
+      machine.play({ a: 'drag', opt: { url: 'pet/Action/drag.swf', opt: {} },
+        s: () => align({ dx: s * 0.58, dy: s * 0.30, duration: 120 }) })
+      return null
+    }
     machine.play({ a: 'drag' })
     return null
   },

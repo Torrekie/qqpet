@@ -101,16 +101,15 @@ const looks = (): Record<string, string[]> => ({
   look_right: ['walk/right_stop2', 'walk/right_stop3', 'walk/rplay', 'walk/rplay2', 'walk/rplay3'],
 })
 
-const DRAG = (ids: number[]): string[] => ids.map((i) => `motion/drag${i}101213`)
-
 export const ACTIONS: Record<Sex, ActionData> = {
   // GG has the newer client's extra clips (#25).
   GG: {
     play: { egg: 47, kid: 127, peaceful: 127 },
     variants: {
       Egg: {
+        // motion/drag*101213 and motion/hide_*130906 under Egg/Kid draw the adult (hide_right130906 is the Adult
+        // file byte for byte): dragging or peeking turned an egg into a grown pet (#43). They stay unused.
         ...walks(2),
-        // Imported motion/hide clips draw adult GG; common() keeps this stage's peeks.
         look_left: ['walk/lplay'],
         look_right: ['walk/rplay'],
       },
@@ -120,8 +119,7 @@ export const ACTIONS: Record<Sex, ActionData> = {
         poor: ['Poor', 'lead/poor20110826'],
         ...looks(),
       },
-      // The imported Egg/Kid motion/drag movies also draw adult GG, despite their directory names.
-      Adult: { ...walks(3), drag: DRAG([1, 2, 3]), hideright: ['Hide_right1', 'motion/hide_right130906'], ...looks() },
+      Adult: { ...walks(3), hideright: ['Hide_right1', 'motion/hide_right130906'], ...looks() },
     },
     extraPlay: {
       // Imported Egg extras draw adult GG and have no age-dependent initialization.

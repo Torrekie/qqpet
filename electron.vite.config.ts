@@ -3,6 +3,7 @@ import { defineConfig } from 'electron-vite'
 import { normalizePath } from 'vite'
 import { viteStaticCopy } from 'vite-plugin-static-copy'
 import { ruffleSafari14 } from './scripts/ruffle-vite'
+import { resolveRuffleBundle } from './scripts/ruffle-bundle.mjs'
 import { appVersion } from './scripts/app-version'
 import { hidpiSvg } from './src/main/hidpi'
 import { petsocPath } from './src/main/nocase'
@@ -53,7 +54,7 @@ export default defineConfig({
       },
       viteStaticCopy({
         // Globs need forward slashes; resolve() yields backslashes on Windows.
-        targets: [{ src: normalizePath(resolve('node_modules/@ruffle-rs/ruffle')) + '/*', dest: 'ruffle', rename: { stripBase: true } }],
+        targets: [{ src: normalizePath(resolveRuffleBundle()) + '/*', dest: 'ruffle', rename: { stripBase: true } }],
       }),
     ],
   },

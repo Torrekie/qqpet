@@ -12,9 +12,9 @@ export function guardRuffleSystemAudio(source) {
   return source.replace(method, method + guard)
 }
 
-export function patchRuffleAudio(source, packageVersion) {
+export function patchRuffleAudio(source, packageVersion, expectedHash = expected) {
   if (packageVersion !== version) throw new Error('Ruffle audio policy requires the pinned 0.6.0 package.')
-  if (createHash('sha256').update(source).digest('hex') !== expected)
+  if (typeof expectedHash !== 'string' || !/^[a-f0-9]{64}$/.test(expectedHash) || createHash('sha256').update(source).digest('hex') !== expectedHash)
     throw new Error('Ruffle loader changed. Audit its audio workaround before updating the pinned compatibility recipe.')
   return guardRuffleSystemAudio(source.toString())
 }

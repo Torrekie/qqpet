@@ -2,6 +2,7 @@ import { resolve } from 'node:path'
 import { defineConfig, normalizePath } from 'vite'
 import { viteStaticCopy } from 'vite-plugin-static-copy'
 import { ruffleSafari14 } from './scripts/ruffle-vite'
+import { resolveRuffleBundle } from './scripts/ruffle-bundle.mjs'
 import { appVersion } from './scripts/app-version'
 
 /** The complete renderer, with WK RPC in place of Electron's preload. Native packaging adds resources/pet. */
@@ -32,7 +33,7 @@ export default defineConfig({
       },
     },
     viteStaticCopy({
-      targets: [{ src: normalizePath(resolve('node_modules/@ruffle-rs/ruffle')) + '/*', dest: 'ruffle', rename: { stripBase: true } }],
+      targets: [{ src: normalizePath(resolveRuffleBundle()) + '/*', dest: 'ruffle', rename: { stripBase: true } }],
     }),
   ],
 })

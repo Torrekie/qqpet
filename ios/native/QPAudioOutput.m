@@ -74,6 +74,7 @@ static NSString *QPAudioReleaseSession(QPAudioContext *context) {
 
 @interface QPAudioOutput ()
 @property(nonatomic, strong) dispatch_queue_t queue;
+@property(nonatomic, strong) dispatch_queue_t callbackQueue;
 @property(nonatomic, strong) NSMutableDictionary<NSString *, QPAudioContext *> *contexts;
 @property(nonatomic, strong) NSMutableArray *observers;
 @property(nonatomic, copy) NSDictionary *snapshot;
@@ -94,6 +95,9 @@ static NSString *QPAudioReleaseSession(QPAudioContext *context) {
 - (instancetype)init {
     if (!(self = [super init])) return nil;
     _queue = dispatch_queue_create("net.ankio.qqpet.audio-output", DISPATCH_QUEUE_SERIAL);
+    // AudioQueueDispose synchronously drains its callback queue internally.
+    // Never use or target that queue for control operations or disposal.
+    _callbackQueue = dispatch_queue_create("net.ankio.qqpet.audio-callback", DISPATCH_QUEUE_SERIAL);
     dispatch_queue_set_specific(_queue, QPAudioQueueKey, (__bridge void *)self, NULL);
     _contexts = [NSMutableDictionary dictionary];
     _observers = [NSMutableArray array];
@@ -230,8 +234,8 @@ static NSString *QPAudioReleaseSession(QPAudioContext *context) {
     context.closed = YES;
     context.running = NO;
     context.requestedRunning = NO;
-    // Mark the generation dead before disposal: synchronous flush callbacks and
-    // any already-scheduled completion blocks must not report successful ends.
+    // Mark the generation dead before disposal: callbacks forwarded from the
+    // independent callback queue must not report successful ends after teardown.
     AudioQueueRef queue = context.queue;
     context.queue = NULL;
     if (queue) AudioQueueDispose(queue, true);
@@ -268,15 +272,17 @@ static NSString *QPAudioReleaseSession(QPAudioContext *context) {
     format.mBitsPerChannel = 32;
     __weak QPAudioOutput *weakSelf = self;
     __weak QPAudioContext *weakContext = context;
+    dispatch_queue_t controlQueue = self.queue;
     AudioQueueRef queue = NULL;
-    OSStatus result = AudioQueueNewOutputWithDispatchQueue(&queue, &format, 0, self.queue, ^(AudioQueueRef output, AudioQueueBufferRef buffer) {
-        QPAudioOutput *owner = weakSelf;
-        QPAudioContext *liveContext = weakContext;
-        if (!owner || !liveContext) return;
-        // Leave AudioQueue's callback stack before invoking bridge code. Apart
-        // from avoiding reentrant teardown, this keeps the last owner release
-        // and any ensuing disposal outside a completion callback.
-        dispatch_async(owner.queue, ^{ [owner completedBuffer:buffer queue:output context:liveContext]; });
+    OSStatus result = AudioQueueNewOutputWithDispatchQueue(&queue, &format, 0, self.callbackQueue, ^(AudioQueueRef output, AudioQueueBufferRef buffer) {
+        // This callback must never wait for controlQueue. Promote weak owners
+        // only in the forwarded block, keeping even a final owner release and
+        // its synchronous disposal off AudioQueue's own callback queue.
+        dispatch_async(controlQueue, ^{
+            QPAudioOutput *owner = weakSelf;
+            QPAudioContext *liveContext = weakContext;
+            if (owner && liveContext) [owner completedBuffer:buffer queue:output context:liveContext];
+        });
     });
     if (result != noErr || !queue) {
         if (queue) AudioQueueDispose(queue, true);

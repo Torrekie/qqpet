@@ -3,8 +3,9 @@
 NS_ASSUME_NONNULL_BEGIN
 
 // Owns native, mixable PCM output for the host's WebAudio bridge. Messages and
-// callbacks are serialized on a private queue. The reply block must marshal UI
-// work asynchronously; it is also retained for that context's completion events.
+// state changes are serialized on a private control queue. AudioQueue callbacks
+// only forward asynchronously from a separate queue. The reply block must
+// marshal UI work asynchronously; it is retained for completion events too.
 @interface QPAudioOutput : NSObject
 @property(nonatomic, readonly, copy) NSDictionary *status;
 - (void)handleMessage:(NSDictionary *)body reply:(void (^)(NSDictionary *event))reply;

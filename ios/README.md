@@ -12,6 +12,17 @@ Inputs can be selected with `QQPET_SDK`, `QQPET_CC`, `QQPET_ARCH`, `QQPET_WEB_RO
 
 Linux builds use an installed iPhoneOS SDK and external Apple LLVM/ld64 tools. Set `QQPET_SDK` and `QQPET_TOOLCHAIN_DIR` to the SDK and toolchain bin directories, or select `QQPET_CC`, `QQPET_LD` and `QQPET_LDID` individually. Linux requires `ldid`; compilation is serial, and packaging checks the Mach-O deployment target and embedded entitlements. The shared `ios-build.yml` workflow downloads pinned, hash-checked tools on Ubuntu and provides IPA artifacts for pull requests and tagged releases.
 
+iOS packaging also requires the complete patched Ruffle runtime. Ruffle 0.6.0's audio callback strongly retains its own output buffer, leaving two buffers behind whenever a player is destroyed. `scripts/patches/ruffle-audio-lifetime.patch` changes that capture to a weak reference. The Linux `ruffle-runtime.yml` workflow builds matching JS and both Wasm variants from the pinned official source archive, checks repeated real player destruction with temporary Rust counters, then rebuilds the production bundle without those counters. It caches only the verified bundle; temporary source, tools and build caches are removed. Generated binaries are not committed, and the npm dependency remains pinned to 0.6.0.
+
+For local builds, download the `ruffle-runtime` artifact from a successful workflow into `out/ruffle-runtime`, then select it while building the web output:
+
+```sh
+QQPET_RUFFLE_BUNDLE="$PWD/out/ruffle-runtime" npm run build:ios-web
+bash ios/build.sh
+```
+
+The shared Vite configuration verifies the complete JS/Wasm bundle before applying its audio guard and Safari 14 transformation. Native packaging rejects unpatched, unprocessed or modified runtime output. Other platforms can select the same bundle with `QQPET_RUFFLE_BUNDLE`; CI uses it for all release builds.
+
 The app icon reuses `build/icon.png`. Checked-in PNG sizes are copied directly into the bundle without an asset catalog or `actool`. If the shared source icon changes, `python3 scripts/prepare-ios-icons.py` regenerates them using open-source Pillow; routine builds do not require Pillow.
 
 Web and native versions use `scripts/version.mjs`: an explicit `QQPET_VERSION`, a CI release tag, the checkout's Git release tag with a development suffix, then the package version as a fallback. `QQPET_BUILD_NUMBER` overrides the numeric bundle build number. The web output includes `version.json`, and packaging rejects a mismatched Web/native identity. Release tags determine the displayed version, bundle metadata and IPA filename together.

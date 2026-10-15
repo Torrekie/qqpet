@@ -1,13 +1,8 @@
 name: Ruffle runtime
 
 on:
+  workflow_call:
   workflow_dispatch:
-  push:
-    paths:
-      - .github/workflows/ruffle-runtime.yml
-      - scripts/build-ruffle-runtime.sh
-      - scripts/check-ruffle-lifetime.mjs
-      - scripts/patches/ruffle-audio-*.patch
 
 permissions:
   contents: read
@@ -20,10 +15,22 @@ jobs:
       - uses: actions/checkout@v4
         with:
           lfs: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - uses: actions/cache@v4
+        id: runtime
+        with:
+          path: out/ruffle-runtime
+          key: ruffle-linux-v1-${{ hashFiles('scripts/build-ruffle-runtime.sh', 'scripts/check-ruffle-lifetime.mjs', 'scripts/patches/ruffle-audio-lifetime.patch') }}
       - name: Fetch the lifetime check movie
+        if: steps.runtime.outputs.cache-hit != 'true'
         run: git lfs pull --include=resources/pet/Action/GG/Egg/Stand.swf --exclude=""
       - name: Build and verify the patched runtime
+        if: steps.runtime.outputs.cache-hit != 'true'
         run: bash scripts/build-ruffle-runtime.sh
+      - name: Verify the complete runtime
+        run: node --input-type=module -e "import { loadRuffleBundle } from './scripts/ruffle-bundle.mjs'; await loadRuffleBundle('out/ruffle-runtime');"
       - uses: actions/upload-artifact@v4
         with:
           name: ruffle-runtime

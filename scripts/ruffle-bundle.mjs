@@ -66,14 +66,32 @@ async function fileHash(path) {
   for await (const chunk of createReadStream(path)) value.update(chunk)
   return value.digest('hex')
 }
-async function verifyFiles(directory, expected) {
+function fileNames(expected) {
+  if (!record(expected)) throw new Error('Invalid Ruffle file inventory.')
   const names = Object.keys(expected).sort()
-  if (names.some(name => !safePath(name) || !digest.test(expected[name]))) throw new Error('Invalid Ruffle file hash or path.')
+  if (names.some(name => !safePath(name) || typeof expected[name] !== 'string' || !digest.test(expected[name]))) throw new Error('Invalid Ruffle file hash or path.')
+  return names
+}
+async function verifyFiles(directory, expected) {
+  const names = fileNames(expected)
   const actual = await filesIn(directory)
   if (JSON.stringify(actual) !== JSON.stringify(names)) throw new Error('Ruffle file set differs from its complete bundle; missing or mixed chunks.')
   for (const name of names) {
     if (await fileHash(resolve(directory, name)) !== expected[name]) throw new Error(`Ruffle file checksum mismatch: ${name}`)
   }
+}
+
+async function verifyRuntimeManifest(manifest) {
+  if (!record(manifest) || manifest.schemaVersion !== RUFFLE_RUNTIME_RECIPE.schemaVersion || manifest.ruffleVersion !== RUFFLE_RUNTIME_RECIPE.ruffleVersion)
+    throw new Error('Ruffle manifest requires the pinned 0.6.0 schema.')
+  for (const field of ['source', 'patch', 'toolchain']) sameFields(manifest[field], RUFFLE_RUNTIME_RECIPE[field], field)
+  if (await fileHash(resolve(root, RUFFLE_RUNTIME_RECIPE.patch.path)) !== manifest.patch.sha256)
+    throw new Error('Ruffle patch checksum differs from the repository patch.')
+  if (!safePath(manifest.fallbackWasm) || manifest.fallbackWasm.includes('/') || !manifest.fallbackWasm.endsWith('.wasm'))
+    throw new Error('Ruffle fallbackWasm must name a bundle-root Wasm file.')
+  if (!record(manifest.files) || !Object.hasOwn(manifest.files, 'ruffle.js') || !Object.hasOwn(manifest.files, manifest.fallbackWasm) || Object.hasOwn(manifest.files, manifestName))
+    throw new Error('Ruffle manifest must cover its loader and fallback, excluding itself.')
+  fileNames(manifest.files)
 }
 
 /** CI consumes the artifact produced by the pinned source recipe in the same run. */
@@ -88,18 +106,11 @@ export async function loadRuffleBundle(directory = resolveRuffleBundle()) {
     await verifyFiles(directory, npmFiles)
     return { directory, version: '0.6.0', fallbackWasm: '72a20ef1c0b8ceb37720.wasm', files: { ...npmFiles }, loaderHash: npmFiles['ruffle.js'], fallbackHash: npmFiles['72a20ef1c0b8ceb37720.wasm'] }
   }
-  if (!record(manifest) || manifest.schemaVersion !== RUFFLE_RUNTIME_RECIPE.schemaVersion || manifest.ruffleVersion !== RUFFLE_RUNTIME_RECIPE.ruffleVersion)
-    throw new Error('Ruffle manifest requires the pinned 0.6.0 schema.')
-  for (const field of ['source', 'patch', 'toolchain']) sameFields(manifest[field], RUFFLE_RUNTIME_RECIPE[field], field)
-  if (await fileHash(resolve(root, RUFFLE_RUNTIME_RECIPE.patch.path)) !== manifest.patch.sha256)
-    throw new Error('Ruffle patch checksum differs from the repository patch.')
-  if (!safePath(manifest.fallbackWasm) || manifest.fallbackWasm.includes('/') || !manifest.fallbackWasm.endsWith('.wasm'))
-    throw new Error('Ruffle fallbackWasm must name a bundle-root Wasm file.')
-  if (!record(manifest.files) || !Object.hasOwn(manifest.files, 'ruffle.js') || !Object.hasOwn(manifest.files, manifest.fallbackWasm) || Object.hasOwn(manifest.files, manifestName))
-    throw new Error('Ruffle manifest must cover its loader and fallback, excluding itself.')
+  if (record(manifest) && Object.hasOwn(manifest, 'processed')) throw new Error('Processed Ruffle output cannot be used as a raw bundle input.')
+  await verifyRuntimeManifest(manifest)
   const files = { ...manifest.files, [manifestName]: await fileHash(resolve(directory, manifestName)) }
   await verifyFiles(directory, files)
-  return { directory, version: manifest.ruffleVersion, fallbackWasm: manifest.fallbackWasm, files, loaderHash: manifest.files['ruffle.js'], fallbackHash: manifest.files[manifest.fallbackWasm] }
+  return { directory, version: manifest.ruffleVersion, fallbackWasm: manifest.fallbackWasm, files, loaderHash: manifest.files['ruffle.js'], fallbackHash: manifest.files[manifest.fallbackWasm], manifest }
 }
 
 /** Check the actual copied directory before either loader or Wasm is transformed. */
@@ -108,6 +119,95 @@ export async function verifyCopiedRuffleBundle(bundle, destination) {
 }
 
 export const RUFFLE_LOWERING_RECIPE = Object.freeze({ recipe: 'signext-lowering-v1', binaryen: '123.0.0' })
+
+function verifyProcessedFiles(manifest, files) {
+  const names = fileNames(files)
+  if (JSON.stringify(names) !== JSON.stringify(fileNames(manifest.files))) throw new Error('Ruffle processed file set differs from the original complete bundle.')
+  for (const name of names) {
+    if (name !== 'ruffle.js' && name !== manifest.fallbackWasm && files[name] !== manifest.files[name])
+      throw new Error(`Ruffle processed output changed an unprocessed chunk: ${name}`)
+  }
+}
+
+// Inspect only the export section: the diagnostic symbol may appear in a Wasm
+// debug/name section without being an executable production API.
+function wasmExports(bytes) {
+  if (!bytes.subarray(0, 8).equals(Buffer.from([0, 97, 115, 109, 1, 0, 0, 0]))) throw new Error('Invalid Ruffle Wasm header.')
+  let at = 8
+  const uint = (end = bytes.length) => {
+    let value = 0, shift = 0, byte
+    do {
+      if (at >= end || shift > 28) throw new Error('Invalid Ruffle Wasm integer.')
+      byte = bytes[at++]
+      if (shift === 28 && byte > 15) throw new Error('Invalid Ruffle Wasm integer.')
+      value += (byte & 127) * 2 ** shift
+      shift += 7
+    } while (byte & 128)
+    return value
+  }
+  const names = []
+  while (at < bytes.length) {
+    const section = bytes[at++], size = uint(), end = at + size
+    if (end > bytes.length) throw new Error('Invalid Ruffle Wasm section.')
+    if (section === 7) {
+      const count = uint(end)
+      for (let i = 0; i < count; ++i) {
+        const length = uint(end)
+        if (length > end - at) throw new Error('Invalid Ruffle Wasm export name.')
+        names.push(bytes.subarray(at, at + length).toString('utf8'))
+        at += length
+        if (at >= end) throw new Error('Invalid Ruffle Wasm export kind.')
+        ++at
+        uint(end)
+      }
+      if (at !== end) throw new Error('Invalid Ruffle Wasm exports.')
+    }
+    at = end
+  }
+  return names
+}
+
+async function verifyNoDiagnosticCounter(directory, names) {
+  for (const name of names) {
+    if (!/\.(?:js|map|wasm)$/.test(name)) continue
+    const bytes = await fs.readFile(resolve(directory, name))
+    if ((name.endsWith('.wasm') ? wasmExports(bytes).includes('audio_buffer_count') : bytes.includes('audio_buffer_count')))
+      throw new Error('A diagnostic audio counter remains in the production Ruffle bundle.')
+  }
+}
+
+/** Record platform output separately from the immutable raw-bundle inventory. */
+export async function recordPatchedRuffleOutput(bundle, destination) {
+  if (!bundle.manifest) return
+  destination = resolve(destination)
+  const files = {}
+  for (const name of await filesIn(destination)) {
+    if (name !== manifestName) files[name] = await fileHash(resolve(destination, name))
+  }
+  verifyProcessedFiles(bundle.manifest, files)
+  await verifyNoDiagnosticCounter(destination, Object.keys(files))
+  const manifest = { ...bundle.manifest, processed: { ...RUFFLE_LOWERING_RECIPE, files } }
+  await fs.writeFile(resolve(destination, manifestName), JSON.stringify(manifest, null, 2) + '\n')
+}
+
+/** iOS packaging accepts only complete, Weak-patched and Safari-14-lowered output. */
+export async function verifyPatchedRuffleOutput(directory) {
+  directory = resolve(directory)
+  let manifest
+  try { manifest = JSON.parse(await fs.readFile(resolve(directory, manifestName), 'utf8')) }
+  catch (error) {
+    if (error.code === 'ENOENT') throw new Error('Patched Ruffle output requires a custom runtime manifest.')
+    throw error
+  }
+  await verifyRuntimeManifest(manifest)
+  if (!record(manifest.processed)) throw new Error('Patched Ruffle output requires completed Safari 14 processing; raw bundles are not accepted.')
+  const { files, ...recipe } = manifest.processed
+  sameFields(recipe, RUFFLE_LOWERING_RECIPE, 'processed recipe')
+  verifyProcessedFiles(manifest, files)
+  await verifyFiles(directory, { ...files, [manifestName]: await fileHash(resolve(directory, manifestName)) })
+  await verifyNoDiagnosticCounter(directory, Object.keys(files))
+}
+
 export function ruffleCacheKey(source) {
   if (!digest.test(source)) throw new Error('Invalid Ruffle cache source hash.')
   return `${source}-${RUFFLE_LOWERING_RECIPE.binaryen}-${RUFFLE_LOWERING_RECIPE.recipe}`

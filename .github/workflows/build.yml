@@ -5,12 +5,18 @@ on:
     tags: ['v*']
 
 jobs:
+  ruffle:
+    uses: ./.github/workflows/ruffle-runtime.yml
+
   build:
+    needs: ruffle
     strategy:
       fail-fast: false
       matrix:
         os: [windows-latest, macos-latest, ubuntu-latest]
     runs-on: ${{ matrix.os }}
+    env:
+      QQPET_RUFFLE_BUNDLE: out/ruffle-runtime
     steps:
       - uses: actions/checkout@v4
         with:
@@ -19,6 +25,10 @@ jobs:
         with:
           node-version: 22
           cache: npm
+      - uses: actions/download-artifact@v4
+        with:
+          name: ruffle-runtime
+          path: out/ruffle-runtime
       - run: npm ci
       - run: npm version "${GITHUB_REF_NAME#v}" --no-git-tag-version --allow-same-version
         shell: bash
@@ -37,7 +47,10 @@ jobs:
           if-no-files-found: error
 
   android:
+    needs: ruffle
     runs-on: ubuntu-latest
+    env:
+      QQPET_RUFFLE_BUNDLE: out/ruffle-runtime
     steps:
       - uses: actions/checkout@v4
         with:
@@ -46,6 +59,10 @@ jobs:
         with:
           node-version: 22
           cache: npm
+      - uses: actions/download-artifact@v4
+        with:
+          name: ruffle-runtime
+          path: out/ruffle-runtime
       - uses: actions/setup-java@v4
         with:
           distribution: temurin
@@ -74,7 +91,10 @@ jobs:
           if-no-files-found: error
 
   harmony:
+    needs: ruffle
     runs-on: ubuntu-latest
+    env:
+      QQPET_RUFFLE_BUNDLE: out/ruffle-runtime
     timeout-minutes: 90
     steps:
       - uses: actions/checkout@v4
@@ -84,6 +104,10 @@ jobs:
         with:
           node-version: 22
           cache: npm
+      - uses: actions/download-artifact@v4
+        with:
+          name: ruffle-runtime
+          path: out/ruffle-runtime
       - run: npm ci
       - run: npm version "${GITHUB_REF_NAME#v}" --no-git-tag-version --allow-same-version
       - run: npm run typecheck && npm run build:harmony-web && node scripts/pack-harmony.mjs
@@ -121,6 +145,7 @@ jobs:
           if-no-files-found: error
 
   ios:
+    needs: ruffle
     uses: ./.github/workflows/ios-build.yml
     with:
       version: ${{ github.ref_name }}

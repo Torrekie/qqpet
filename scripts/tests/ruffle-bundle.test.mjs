@@ -5,24 +5,45 @@ import { tmpdir } from 'node:os'
 import { join, resolve } from 'node:path'
 import test from 'node:test'
 import { patchRuffleAudio } from '../patch-ruffle-audio.mjs'
-import { RUFFLE_RUNTIME_RECIPE, loadRuffleBundle, resolveRuffleBundle, ruffleCacheKey, ruffleCacheRecord, validRuffleCache, verifyCopiedRuffleBundle } from '../ruffle-bundle.mjs'
+import { RUFFLE_LOWERING_RECIPE, RUFFLE_RUNTIME_RECIPE, loadRuffleBundle, recordPatchedRuffleOutput, resolveRuffleBundle, ruffleCacheKey, ruffleCacheRecord, validRuffleCache, verifyCopiedRuffleBundle, verifyPatchedRuffleOutput } from '../ruffle-bundle.mjs'
 
 const hash = bytes => createHash('sha256').update(bytes).digest('hex')
+const wasmHeader = Buffer.from([0, 97, 115, 109, 1, 0, 0, 0])
+const wasm = variant => {
+  const payload = Buffer.concat([Buffer.from([0]), Buffer.from(variant)])
+  return Buffer.concat([wasmHeader, Buffer.from([0, payload.length]), payload])
+}
+const counterWasm = () => {
+  const name = Buffer.from('audio_buffer_count')
+  const exports = Buffer.concat([Buffer.from([1, name.length]), name, Buffer.from([2, 0])])
+  return Buffer.concat([wasmHeader, Buffer.from([5, 3, 1, 0, 1, 7, exports.length]), exports])
+}
 
 async function fixture(t, variant = '') {
   const directory = await fs.mkdtemp(join(tmpdir(), 'qqpet-ruffle-'))
   t.after(() => fs.rm(directory, { recursive: true, force: true }))
   const files = {
     'ruffle.js': Buffer.from('class Player{unmuteAudioContext(){return 1}}'),
+    'ruffle.js.map': Buffer.from('{}'),
     'core.ruffle.fixture.js': Buffer.from('/* matching generated glue */'),
-    'fallback-fixture.wasm': Buffer.from('fallback' + variant),
-    'simd-fixture.wasm': Buffer.from('simd' + variant),
+    'fallback-fixture.wasm': wasm('fallback' + variant),
+    'simd-fixture.wasm': wasm('simd' + variant),
   }
   for (const [name, bytes] of Object.entries(files)) await fs.writeFile(join(directory, name), bytes)
   const manifest = { ...structuredClone(RUFFLE_RUNTIME_RECIPE), fallbackWasm: 'fallback-fixture.wasm', files: Object.fromEntries(Object.entries(files).map(([name, bytes]) => [name, hash(bytes)])) }
   const writeManifest = () => fs.writeFile(join(directory, 'qqpet-runtime.json'), JSON.stringify(manifest))
   await writeManifest()
   return { directory, files, manifest, writeManifest }
+}
+
+async function processedFixture(t) {
+  const f = await fixture(t)
+  const bundle = await loadRuffleBundle(f.directory)
+  await fs.writeFile(join(f.directory, 'ruffle.js'), patchRuffleAudio(f.files['ruffle.js'], bundle.version, bundle.loaderHash))
+  await fs.writeFile(join(f.directory, bundle.fallbackWasm), wasm('lowered'))
+  await recordPatchedRuffleOutput(bundle, f.directory)
+  const manifest = JSON.parse(await fs.readFile(join(f.directory, 'qqpet-runtime.json'), 'utf8'))
+  return { ...f, inputManifest: f.manifest, manifest, writeManifest: () => fs.writeFile(join(f.directory, 'qqpet-runtime.json'), JSON.stringify(manifest)) }
 }
 
 test('bundle source defaults to the pinned npm package and accepts an explicit directory', () => {
@@ -108,4 +129,74 @@ test('lowering cache separates fallback bytes and rejects another recipe or dama
   assert.equal(validRuffleCache({ ...record, recipe: 'older' }, first, lowered), false)
   assert.equal(validRuffleCache({ ...record, binaryen: 'other' }, first, lowered), false)
   assert.equal(validRuffleCache(record, first, Buffer.from('corrupted')), false)
+})
+
+test('processed output preserves the raw inventory and records the complete final directory separately', async t => {
+  const f = await processedFixture(t)
+  assert.deepEqual(f.manifest.files, f.inputManifest.files)
+  assert.deepEqual(Object.keys(f.manifest.processed.files).sort(), Object.keys(f.inputManifest.files).sort())
+  const { files, ...recipe } = f.manifest.processed
+  assert.deepEqual(recipe, RUFFLE_LOWERING_RECIPE)
+  assert.notEqual(files['ruffle.js'], f.manifest.files['ruffle.js'])
+  assert.notEqual(files[f.manifest.fallbackWasm], f.manifest.files[f.manifest.fallbackWasm])
+  assert.equal(files['core.ruffle.fixture.js'], f.manifest.files['core.ruffle.fixture.js'])
+  assert.equal(Object.hasOwn(files, 'qqpet-runtime.json'), false)
+  assert.equal(await verifyPatchedRuffleOutput(f.directory), undefined)
+  await assert.rejects(loadRuffleBundle(f.directory), /Processed.*raw bundle input/)
+})
+
+test('packaging rejects raw bundles and legacy output without a custom processing manifest', async t => {
+  const f = await fixture(t)
+  await assert.rejects(verifyPatchedRuffleOutput(f.directory), /raw bundles are not accepted/)
+  await fs.unlink(join(f.directory, 'qqpet-runtime.json'))
+  await recordPatchedRuffleOutput({ manifest: undefined }, f.directory)
+  await assert.rejects(verifyPatchedRuffleOutput(f.directory), /requires a custom runtime manifest/)
+})
+
+test('processed output still requires the exact lowering, source, Weak patch and build toolchain recipes', async t => {
+  for (const field of ['source', 'patch', 'toolchain', 'processed']) {
+    const f = await processedFixture(t)
+    const key = Object.keys(f.manifest[field]).find(key => key !== 'files')
+    f.manifest[field][key] = 'unreviewed change'
+    await f.writeManifest()
+    await assert.rejects(verifyPatchedRuffleOutput(f.directory), /pinned recipe/)
+  }
+})
+
+test('processed output rejects edits, extra chunks and inventory changes after lowering', async t => {
+  for (const mutation of ['modified', 'extra', 'missing', 'inventory']) {
+    const f = await processedFixture(t)
+    if (mutation === 'modified') await fs.appendFile(join(f.directory, 'ruffle.js'), '/* changed */')
+    if (mutation === 'extra') await fs.writeFile(join(f.directory, 'core.ruffle.other.js'), 'another build')
+    if (mutation === 'missing') await fs.unlink(join(f.directory, 'simd-fixture.wasm'))
+    if (mutation === 'inventory') {
+      const bytes = Buffer.from('different unprocessed glue')
+      await fs.writeFile(join(f.directory, 'core.ruffle.fixture.js'), bytes)
+      f.manifest.processed.files['core.ruffle.fixture.js'] = hash(bytes)
+      await f.writeManifest()
+    }
+    await assert.rejects(verifyPatchedRuffleOutput(f.directory), /checksum mismatch|file set|unprocessed chunk/)
+  }
+})
+
+test('production output rejects the diagnostic counter even when its output checksum matches', async t => {
+  for (const name of ['ruffle.js', 'ruffle.js.map', 'fallback-fixture.wasm']) {
+    const f = await processedFixture(t)
+    const bytes = name.endsWith('.wasm') ? counterWasm() : Buffer.from('/* audio_buffer_count */')
+    await fs.writeFile(join(f.directory, name), bytes)
+    f.manifest.processed.files[name] = hash(bytes)
+    // Maps are not lowered; model a diagnostic raw build with a matching map.
+    if (name.endsWith('.map')) f.manifest.files[name] = hash(bytes)
+    await f.writeManifest()
+    await assert.rejects(verifyPatchedRuffleOutput(f.directory), /diagnostic audio counter/)
+  }
+})
+
+test('processing cannot certify an accidentally mixed unprocessed chunk', async t => {
+  const f = await fixture(t)
+  const bundle = await loadRuffleBundle(f.directory)
+  await fs.appendFile(join(f.directory, 'core.ruffle.fixture.js'), '/* other build */')
+  await assert.rejects(recordPatchedRuffleOutput(bundle, f.directory), /unprocessed chunk/)
+  const manifest = JSON.parse(await fs.readFile(join(f.directory, 'qqpet-runtime.json'), 'utf8'))
+  assert.equal(Object.hasOwn(manifest, 'processed'), false)
 })

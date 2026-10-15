@@ -90,6 +90,15 @@ const expected = process.argv[3]
 const actual = JSON.parse(fs.readFileSync(file, 'utf8'))
 if (actual.version !== expected) throw new Error('Web/native versions differ; rebuild the web output with the same version inputs.')
 NODE
+  "$node" --input-type=module - "$repo_root" "$web_root/ruffle" <<'NODE'
+import { resolve } from 'node:path'
+import { pathToFileURL } from 'node:url'
+const { verifyPatchedRuffleOutput } = await import(pathToFileURL(resolve(process.argv[2], 'scripts/ruffle-bundle.mjs')))
+try { await verifyPatchedRuffleOutput(process.argv[3]) }
+catch (error) {
+  throw new Error(`iOS packaging requires the patched Ruffle runtime and Safari 14 web build. See ios/README.md. ${error.message}`)
+}
+NODE
 fi
 bundle_dir="$build_root/Payload/QQPet.app"
 mkdir -p "$build_root/obj" "$bundle_dir"

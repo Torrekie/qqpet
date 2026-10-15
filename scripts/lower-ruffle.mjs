@@ -1,7 +1,7 @@
 import { promises as fs } from 'node:fs'
 import { resolve } from 'node:path'
 import { patchRuffleAudio } from './patch-ruffle-audio.mjs'
-import { RUFFLE_LOWERING_RECIPE, loadRuffleBundle, resolveRuffleBundle, ruffleCacheKey, ruffleCacheRecord, validRuffleCache, verifyCopiedRuffleBundle } from './ruffle-bundle.mjs'
+import { RUFFLE_LOWERING_RECIPE, loadRuffleBundle, recordPatchedRuffleOutput, resolveRuffleBundle, ruffleCacheKey, ruffleCacheRecord, validRuffleCache, verifyCopiedRuffleBundle } from './ruffle-bundle.mjs'
 
 // Ruffle 0.6's fallback is labeled MVP, but has sign-extension instructions.
 // Safari 14.0 (iOS 14.0–14.4 / macOS 11.0) needs their equivalent shift form.
@@ -41,4 +41,5 @@ if (!lowered) {
 }
 await fs.copyFile(cached, resolve(destination, name))
 await fs.writeFile(resolve(destination, 'ruffle.js'), loader)
+await recordPatchedRuffleOutput(bundle, destination)
 console.log('Ruffle fallback validated for Safari 14.0.')

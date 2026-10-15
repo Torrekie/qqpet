@@ -32,11 +32,16 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  ruffle:
+    uses: ./.github/workflows/ruffle-runtime.yml
+
   web:
+    needs: ruffle
     runs-on: ubuntu-latest
     env:
       ELECTRON_SKIP_BINARY_DOWNLOAD: '1'
       NODE_OPTIONS: --max-old-space-size=1024
+      QQPET_RUFFLE_BUNDLE: out/ruffle-runtime
     steps:
       - uses: actions/checkout@v4
         with:
@@ -45,6 +50,10 @@ jobs:
         with:
           node-version: 22
           cache: npm
+      - uses: actions/download-artifact@v4
+        with:
+          name: ruffle-runtime
+          path: out/ruffle-runtime
       - run: npm ci --ignore-scripts --no-audit --no-fund
       - run: npm run typecheck
       - run: npm run test:compat

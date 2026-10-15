@@ -20,6 +20,7 @@ jobs:
       ELECTRON_SKIP_BINARY_DOWNLOAD: '1'
       NODE_OPTIONS: --max-old-space-size=1024
       QQPET_ARCH: arm64
+      QQPET_RUFFLE_BUNDLE: out/ruffle-runtime
       QQPET_ASSET_REPOSITORY: ${{ github.repository }}
       QQPET_ASSET_REVISION: ${{ github.sha }}
       QQPET_SDK_URL: https://github.com/theos/sdks/releases/download/master-146e41f/iPhoneOS14.5.sdk.tar.xz
@@ -37,6 +38,10 @@ jobs:
         with:
           node-version: 22
           cache: npm
+      - uses: actions/download-artifact@v4
+        with:
+          name: ruffle-runtime
+          path: out/ruffle-runtime
       - name: Install cross-build host tools
         run: |
           set -euo pipefail

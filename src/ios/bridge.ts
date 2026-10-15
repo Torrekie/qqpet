@@ -112,7 +112,7 @@ let fatalPanicAttempts = 0
 function publishFatalPanic(): void {
   if (!fatalPanicNotice || postedFatalPanic || fatalPanicAttempts >= 3) return
   fatalPanicAttempts++
-  try { rpc.notify('rufflePanic', fatalPanicNotice); postedFatalPanic = true }
+  try { rpc.notify('rufflePanic', { ...fatalPanicNotice }); postedFatalPanic = true }
   catch (error) { console.error('QQPet could not publish its Ruffle failure:', error) }
 }
 function acceptRufflePanic(panic: RufflePanic): void {

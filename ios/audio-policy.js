@@ -1,31 +1,46 @@
 // The native host applies this policy before Ruffle in every frame.
 window.__qqpetRespectSystemAudio = true;
 
-// iOS 15 defers the WebAudio session category update. Starting output first
-// activates SoloAmbient and interrupts other audio before Ambient is selected.
-// Pause synchronously, then allow that update to run before the first resume.
-// This ordering relies on iOS 15 AudioContext's script-suspended startup path.
-if (window.__qqpetDeferAudioStart === true) {
-  const Native = window.AudioContext || window.webkitAudioContext;
-  if (Native) {
-    const DeferredAudioContext = new Proxy(Native, {
-      construct(target, args, newTarget) {
-        const context = Reflect.construct(target, args, newTarget);
-        const resume = context.resume.bind(context);
-        const suspend = context.suspend.bind(context);
-        const suspended = suspend();
-        let suspension = 0;
-        const ready = Promise.resolve(suspended).catch(() => {}).then(() => new Promise(resolve => setTimeout(resolve, 200)));
-        context.suspend = () => { suspension++; return suspend(); };
-        context.resume = () => {
-          const expected = suspension;
-          // A later pause must still win while startup is waiting.
-          return ready.then(() => expected === suspension ? resume() : undefined);
-        };
-        return context;
-      },
-    });
-    if (window.AudioContext) window.AudioContext = DeferredAudioContext;
-    if (window.webkitAudioContext) window.webkitAudioContext = DeferredAudioContext;
+// iOS 15 requires an Ambient session in the actual WebContent audio process
+// before constructing an AudioContext. Native lazy initialization can start I/O
+// without calling JavaScript resume(), so a timed resume delay cannot guard it.
+if (window.__qqpetRequireNativeAudioPolicy === true) {
+  window.__qqpetAudioPolicyState = 'required';
+  const constructors = new Map();
+  for (const name of ['AudioContext', 'webkitAudioContext']) {
+    const Native = window[name];
+    if (typeof Native !== 'function') continue;
+    let guarded = constructors.get(Native);
+    if (!guarded) {
+      guarded = new Proxy(Native, {
+        construct(target, args, newTarget) {
+          const fail = (state, message) => {
+            window.__qqpetAudioPolicyState = state;
+            window.__qqpetAudioPolicyError = message;
+            throw new Error(`QQPet audio policy: ${message}`);
+          };
+          if (window.__qqpetLocalAudioOutput !== true)
+            return fail('local-output-unavailable', 'WebContent audio output was not configured.');
+          if (typeof window.__qqpetPrepareAudio !== 'function')
+            return fail('native-bridge-unavailable', 'The native Ambient audio policy is unavailable.');
+          let prepared;
+          try {
+            prepared = window.__qqpetPrepareAudio();
+          } catch {
+            return fail('native-call-failed', 'The native Ambient audio policy failed.');
+          }
+          if (prepared !== true)
+            return fail('native-category-failed', 'The native audio session did not confirm Ambient.');
+          window.__qqpetAudioPolicyState = 'ready';
+          delete window.__qqpetAudioPolicyError;
+          return Reflect.construct(target, args, newTarget);
+        },
+      });
+      constructors.set(Native, guarded);
+    }
+    window[name] = guarded;
   }
+  if (!constructors.size) window.__qqpetAudioPolicyState = 'audio-context-unavailable';
+} else {
+  window.__qqpetAudioPolicyState = 'system-default';
 }

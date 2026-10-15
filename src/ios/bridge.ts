@@ -119,6 +119,8 @@ function savedStatus(): void {
   } : null
   try { rpc.notify('status', {
     role, state: 'saved', havePet: model.havePet,
+    audioSessionPolicy: (window as Window & { __qqpetAudioPolicyState?: string }).__qqpetAudioPolicyState ?? 'system-default',
+    audioSessionError: (window as Window & { __qqpetAudioPolicyError?: string }).__qqpetAudioPolicyError ?? null,
     pet: { name: pet.name, sex: pet.sex, level: model.petComputedlInfo.level, health: pet.health, mood: pet.mood },
     settings: { clip: model.settings.clip, watchApp: model.settings.watchApp, hd: model.settings.hd },
     render,

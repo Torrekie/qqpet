@@ -112,7 +112,6 @@ for source in "$ios_root"/native/*.m "$ios_root"/vendor/TrollSpeed/KIF/*.m; do
     "$cc" "${common[@]}" -c "$source" -o "$object"
   fi
 done
-printf '%s\n' "$signature" > "$build_root/compile-signature"
 link_args=("${common[@]}" "-fuse-ld=$ld" "${objects[@]}")
 if [[ -n "${QQPET_IOS_CLANG_RT:-}" ]]; then
   [[ -f "$QQPET_IOS_CLANG_RT" ]] || fail "Missing iOS compiler-rt archive: $QQPET_IOS_CLANG_RT"
@@ -120,6 +119,51 @@ if [[ -n "${QQPET_IOS_CLANG_RT:-}" ]]; then
 fi
 "$cc" "${link_args[@]}" -Wl,-adhoc_codesign -o "$bundle_dir/QQPetIOS" \
   -framework Foundation -framework UIKit -framework WebKit -framework QuartzCore -framework CoreGraphics -framework CoreFoundation
+# WebKit loads this Objective-C plug-in inside this app's dedicated WebContent.
+# Its own signature carries no app/HUD entitlements.
+audio_bundle="$bundle_dir/QQPetWebAudio.bundle"
+mkdir -p "$audio_bundle"
+audio_slices=()
+# The system WebContent is arm64e on newer devices even when our app is arm64.
+# Compile both ABIs; changing a Mach-O subtype cannot provide pointer authentication.
+for audio_arch in arm64 arm64e; do
+  audio_common=("${common[@]}")
+  audio_common[1]="$audio_arch-apple-ios$minimum_ios"
+  audio_object="$build_root/obj/QPWebAudio-$audio_arch.m.o"
+  if [[ ! -f "$audio_object" || "$ios_root/web-audio/QPWebAudio.m" -nt "$audio_object" || "$signature" != "$old_signature" ]]; then
+    printf 'Compiling QPWebAudio.m (%s)\n' "$audio_arch"
+    "$cc" "${audio_common[@]}" -c "$ios_root/web-audio/QPWebAudio.m" -o "$audio_object"
+  fi
+  audio_link=("${audio_common[@]}" "-fuse-ld=$ld" "$audio_object")
+  if [[ -n "${QQPET_IOS_CLANG_RT:-}" ]]; then audio_link+=("$(absolute_path "$QQPET_IOS_CLANG_RT")"); fi
+  audio_thin="$build_root/QQPetWebAudio-$audio_arch"
+  "$cc" "${audio_link[@]}" -bundle -Wl,-adhoc_codesign -o "$audio_thin" \
+    -framework Foundation -framework AVFoundation -framework JavaScriptCore
+  audio_slices+=("$audio_thin")
+done
+printf '%s\n' "$signature" > "$build_root/compile-signature"
+# Standard FAT32 container, avoiding a separate Apple-only lipo dependency.
+"$python" - "$audio_bundle/QQPetWebAudio" "${audio_slices[@]}" <<'PY'
+import struct, sys
+from pathlib import Path
+result = bytearray(struct.pack('>II', 0xCAFEBABE, 2) + bytes(40))
+for index, name in enumerate(sys.argv[2:]):
+    data = Path(name).read_bytes()
+    magic, cpu, subtype, kind = struct.unpack_from('<4I', data)
+    assert magic == 0xFEEDFACF and cpu == 0x0100000C and kind == 8
+    assert subtype & 0xFFFFFF == (0 if index == 0 else 2)
+    offset = (len(result) + 16383) & ~16383
+    result.extend(bytes(offset - len(result)))
+    struct.pack_into('>5I', result, 8 + index * 20, cpu, subtype, offset, len(data), 14)
+    result.extend(data)
+Path(sys.argv[1]).write_bytes(result)
+PY
+"$node" "$repo_root/scripts/version.mjs" --plist "$ios_root/web-audio/Info.plist" --output "$audio_bundle/Info.plist"
+if [[ -n "$ldid" ]]; then "$ldid" -Cadhoc -S"$ios_root/web-audio/entitlements.plist" "$audio_bundle/QQPetWebAudio"
+else "$codesign" --force --sign - --entitlements "$ios_root/web-audio/entitlements.plist" "$audio_bundle/QQPetWebAudio"; fi
+for audio_arch in arm64 arm64e; do
+  "$python" "$repo_root/scripts/check-ios-binary.py" "$audio_bundle/QQPetWebAudio" --kind bundle --arch "$audio_arch" --minimum "$minimum_ios" --entitlements "$ios_root/web-audio/entitlements.plist"
+done
 "$node" "$repo_root/scripts/version.mjs" --plist "$ios_root/Info.plist" --output "$bundle_dir/Info.plist"
 cp "$ios_root"/icons/*.png "$bundle_dir/"
 cp "$ios_root/audio-policy.js" "$bundle_dir/"

@@ -107,13 +107,13 @@ static CGFloat QPOrientationAngle(UIInterfaceOrientation orientation) {
     [self.cropView addSubview:self.viewport];
     WKWebViewConfiguration *config=[WKWebViewConfiguration new];
     config.allowsInlineMediaPlayback=YES; config.mediaTypesRequiringUserActionForPlayback=WKAudiovisualMediaTypeNone;
-    self.mediaAudioProcess=QPConfigureMediaPreferences(config.preferences);
+    self.mediaAudioProcess=QPConfigureMediaConfiguration(config);
     // Apply before Ruffle in every document, including its separate SWF frames.
     NSURL *audioPolicyURL=[NSBundle.mainBundle URLForResource:@"audio-policy" withExtension:@"js"];
     NSError *audioPolicyError=nil;
     NSString *audioPolicy=audioPolicyURL?[NSString stringWithContentsOfURL:audioPolicyURL encoding:NSUTF8StringEncoding error:&audioPolicyError]:nil;
     if (audioPolicy) {
-        NSString *source=[NSString stringWithFormat:@"window.__qqpetDeferAudioStart=%@;\n%@",NSProcessInfo.processInfo.operatingSystemVersion.majorVersion==15?@"true":@"false",audioPolicy];
+        NSString *source=[NSString stringWithFormat:@"window.__qqpetRequireNativeAudioPolicy=%@;\nwindow.__qqpetLocalAudioOutput=%@;\n%@",NSProcessInfo.processInfo.operatingSystemVersion.majorVersion==15?@"true":@"false",[self.mediaAudioProcess isEqual:@"webcontent"]?@"true":@"false",audioPolicy];
         [config.userContentController addUserScript:[[WKUserScript alloc] initWithSource:source injectionTime:WKUserScriptInjectionTimeAtDocumentStart forMainFrameOnly:NO]];
     } else NSLog(@"QQPet audio policy unavailable: %@",audioPolicyError.localizedDescription);
     [config.userContentController addScriptMessageHandler:self name:@"qqpet"];

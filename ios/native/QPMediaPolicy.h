@@ -1,7 +1,7 @@
 #import <WebKit/WebKit.h>
 
 NS_ASSUME_NONNULL_BEGIN
-// Configure before creating the WKWebView. The returned mode is diagnostic;
-// system-default and gpu-fallback leave WebKit's original media path intact.
-FOUNDATION_EXPORT NSString *QPConfigureMediaPreferences(WKPreferences *preferences);
+// Configure the private process pool and media preference before the WebView.
+// Only webcontent permits iOS 15's guarded WebAudio constructor to run.
+FOUNDATION_EXPORT NSString *QPConfigureMediaConfiguration(WKWebViewConfiguration *configuration);
 NS_ASSUME_NONNULL_END

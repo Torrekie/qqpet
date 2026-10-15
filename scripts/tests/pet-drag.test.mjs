@@ -111,6 +111,8 @@ export function renderer(size, crop = { x: 0, y: 0 }, native = null, stage = 'Eg
     adopt: noop,
     closeMenu: () => { menuCloses++ },
     showControl: noop,
+    clearFacePoints: noop,
+    showFacePoints: noop,
     catchDiudiule: noop,
     releaseDiudiule: (...args) => { releases.push(args); return false },
     scheduleHide: noop,

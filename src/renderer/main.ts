@@ -10,7 +10,7 @@ import { catchDiudiule, releaseDiudiule } from './ui/diudiule'
 import { scheduleHide, showControl } from './ui/control'
 import { div, pageX, pageY, touch } from './ui/dom'
 import './ui/background'
-import './ui/face'
+import { clearFacePoints, showFacePoints } from './ui/face'
 import { closeMenu, openMenu } from './ui/menu'
 import { closeState, openState } from './ui/state'
 import { startAutoUpdate } from './ui/update'
@@ -234,6 +234,7 @@ const petInput = createPetInput({
   cancelFrame: cancelAnimationFrame,
   position: () => ({ x: info.lastX, y: info.lastY, size }),
   begin: () => {
+    clearFacePoints()
     closeMenu()
     if (save.settings.petBar) showControl()
     catchDiudiule()
@@ -269,6 +270,7 @@ const petInput = createPetInput({
     } else if (edge) machine.play({ a: edge })
     else if (lifted || machine.pose.a === 'hideleft' || machine.pose.a === 'hideright') machine.play({ a: 'normal' })
     scheduleHide()
+    if (touch && !lifted && !cancelled) showFacePoints()
   },
 }, touch ? HOLD_MS : 0)
 

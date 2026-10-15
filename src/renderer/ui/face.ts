@@ -33,8 +33,8 @@ export function setFaceClick(v: 0 | 1 | 2): void {
 }
 document.body.classList.toggle('faceHint', save.settings.faceClick === 2)
 
-function show(): void {
-  if (!save.settings.faceClick) return
+export function showFacePoints(): void {
+  if (!save.settings.faceClick || machine.pose.a !== 'normal') return
   const st = stage()
   const points = st === 'Adult' ? FACE[info.sex].Adult[mood()] : FACE[info.sex][st]
   layer.replaceChildren(
@@ -51,19 +51,17 @@ function show(): void {
 
 // Spots appear after hovering an idle pet without a button held.
 let timer = 0
-petEl.addEventListener('pointerenter', () => {
-  timer = window.setTimeout(() => machine.pose.a === 'normal' && show(), HOVER_MS)
-})
-// A finger enters only as it presses and leaves as it lifts: on touch a tap shows them, until the next press.
-if (touch) {
-  petEl.addEventListener('pointerup', (e) => {
-    if (!layer.contains(e.target as Node) && machine.pose.a === 'normal') show()
-  })
+export function clearFacePoints(): void {
+  clearTimeout(timer)
+  layer.replaceChildren()
 }
+if (!touch) petEl.addEventListener('pointerenter', () => {
+  timer = window.setTimeout(showFacePoints, HOVER_MS)
+})
+// Touch taps are handled by the shared pet gesture path, including native hosts.
 for (const ev of touch ? (['pointerdown'] as const) : (['pointerleave', 'pointerdown'] as const)) {
   petEl.addEventListener(ev, (e) => {
     if (layer.contains(e.target as Node)) return
-    clearTimeout(timer)
-    layer.replaceChildren()
+    clearFacePoints()
   })
 }

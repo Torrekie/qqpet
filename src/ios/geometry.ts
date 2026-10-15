@@ -3,6 +3,7 @@ import type { IOSRPC } from './rpc'
 
 export interface Rect { x: number; y: number; width: number; height: number }
 export interface PetPointer { phase: 'begin' | 'move' | 'end' | 'cancel'; id: number; x: number; y: number; time?: number }
+interface GeometryTiming { framesPerSecond: number; lastFrameAgoMs: number | null; maxFrameGapMs: number }
 
 const rect = (box: Box): Rect => ({ x: box.left, y: box.top, width: box.right - box.left, height: box.bottom - box.top })
 const visible = (element: Element): boolean => {
@@ -16,7 +17,7 @@ const visible = (element: Element): boolean => {
 }
 
 /** Full page CSS coordinates remain fixed while the native surface is cropped. */
-export function startGeometry(rpc: IOSRPC): { pointer(input: PetPointer): void; pause(paused: boolean): void; stop(): void; bounds(): Rect } {
+export function startGeometry(rpc: IOSRPC): { pointer(input: PetPointer): void; pause(paused: boolean): void; stop(): void; bounds(): Rect; timing(): GeometryTiming } {
   const presses = new Map<number, { x: number; y: number }>()
   let dragging = false
   let stopped = false
@@ -24,6 +25,11 @@ export function startGeometry(rpc: IOSRPC): { pointer(input: PetPointer): void; 
   let frame = 0
   let previous = ''
   let bounds: Rect = { x: 0, y: 0, width: 0, height: 0 }
+  let lastFrame: number | null = null
+  let sampleStart = performance.now()
+  let sampleFrames = 0
+  let framesPerSecond = 0
+  let maxFrameGapMs = 0
 
   const pointer = (input: PetPointer): void => {
     if (input.phase === 'cancel' && input.id === -1) { presses.clear(); dragging = false }
@@ -44,6 +50,15 @@ export function startGeometry(rpc: IOSRPC): { pointer(input: PetPointer): void; 
     if (stopped) return
     frame = requestAnimationFrame(track)
     if (paused) return
+    const now = performance.now()
+    if (lastFrame !== null) maxFrameGapMs = Math.max(maxFrameGapMs, now - lastFrame)
+    lastFrame = now
+    sampleFrames++
+    if (now - sampleStart >= 1000) {
+      framesPerSecond = Math.round(sampleFrames * 10000 / (now - sampleStart)) / 10
+      sampleStart = now
+      sampleFrames = 0
+    }
     let left = innerWidth, top = innerHeight, right = 0, bottom = 0
     for (const element of document.body.querySelectorAll('*')) {
       let box: Box | null
@@ -82,8 +97,16 @@ export function startGeometry(rpc: IOSRPC): { pointer(input: PetPointer): void; 
   return {
     pointer,
     bounds: () => bounds,
+    timing: () => ({ framesPerSecond, lastFrameAgoMs: lastFrame === null ? null : Math.round(performance.now() - lastFrame), maxFrameGapMs: Math.round(maxFrameGapMs) }),
     pause(value) {
-      if (paused !== value) resetCoverage()
+      if (paused !== value) {
+        resetCoverage()
+        lastFrame = null
+        sampleStart = performance.now()
+        sampleFrames = 0
+        framesPerSecond = 0
+        maxFrameGapMs = 0
+      }
       paused = value
       if (paused) pointer({ phase: 'cancel', id: -1, x: 0, y: 0 })
     },

@@ -146,8 +146,13 @@ function savedStatus(): void {
   if (!model) return
   const pet = model.petInfo
   const element = document.getElementById('pet')
+  const visual = window.visualViewport
   const render = element ? {
+    observedAt: Date.now() / 1000,
     hidden: element.hidden, paused: Boolean(window.__qqpetHostPaused),
+    viewport: { width: innerWidth, height: innerHeight, clientWidth: document.documentElement.clientWidth, clientHeight: document.documentElement.clientHeight,
+      visibility: document.visibilityState, visual: visual ? { width: visual.width, height: visual.height, scale: visual.scale } : null },
+    timing: geometry?.timing() ?? null,
     position: { x: element.offsetLeft, y: element.offsetTop, size: element.offsetWidth },
     players: Array.from(element.querySelectorAll('ruffle-player')).map((player) => {
       const movie = player as RufflePlayerElement

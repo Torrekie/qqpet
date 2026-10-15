@@ -5,11 +5,21 @@
 #import "QPMemoryPolicy.h"
 #import <math.h>
 
+// Read-only getter in Safari 610 / 612; it forwards to the content view's
+// application-state tracker and does not acquire a process assertion.
+// https://github.com/WebKit/WebKit/blob/Safari-610.1.28.1.9/Source/WebKit/UIProcess/API/ios/WKWebViewIOS.mm#L264
+// https://github.com/WebKit/WebKit/blob/Safari-612.1.29.41.4/Source/WebKit/UIProcess/API/ios/WKWebViewIOS.mm#L271
+@interface WKWebView (QPRuntimeState)
+- (BOOL)_isBackground;
+@end
+
 static NSString *QPJSON(id value) {
     NSData *data = [NSJSONSerialization dataWithJSONObject:value ?: NSNull.null options:NSJSONWritingFragmentsAllowed error:NULL];
     return data ? [[NSString alloc] initWithData:data encoding:NSUTF8StringEncoding] : @"null";
 }
 static CGRect QPBox(NSDictionary *box) { return CGRectMake([box[@"x"] doubleValue],[box[@"y"] doubleValue],[box[@"width"] doubleValue],[box[@"height"] doubleValue]); }
+static NSDictionary *QPRectState(CGRect rect) { return @{@"x":@(rect.origin.x),@"y":@(rect.origin.y),@"width":@(rect.size.width),@"height":@(rect.size.height)}; }
+static NSDictionary *QPSizeState(CGSize size) { return @{@"width":@(size.width),@"height":@(size.height)}; }
 static CGSize QPViewportSize(UIInterfaceOrientation orientation) {
     CGSize fixed=UIScreen.mainScreen.fixedCoordinateSpace.bounds.size;
     return UIInterfaceOrientationIsLandscape(orientation)?CGSizeMake(fixed.height,fixed.width):fixed;
@@ -173,6 +183,20 @@ static CGFloat QPOrientationAngle(UIInterfaceOrientation orientation) {
     NSDictionary *policy=[self.processPolicy updateWithWebView:self.webView active:!self.paused&&!self.invalidated];
     NSMutableDictionary *status=[@{@"mediaAudioProcess":@"native-audioqueue",@"nativeAudio":self.audioOutput.status ?: @{}} mutableCopy];
     if (policy) status[@"processPolicy"]=policy;
+    BOOL supportsBackground=[self.webView respondsToSelector:@selector(_isBackground)];
+    UIApplicationState applicationState=UIApplication.sharedApplication.applicationState;
+    NSString *applicationStateName=applicationState==UIApplicationStateActive?@"active":(applicationState==UIApplicationStateInactive?@"inactive":(applicationState==UIApplicationStateBackground?@"background":@"unknown"));
+    UIWindow *window=self.webView.window;
+    status[@"webViewState"]=@{
+        @"isBackgroundSupported":@(supportsBackground),
+        @"isBackground":supportsBackground?@(self.webView._isBackground):(id)NSNull.null,
+        @"applicationState":applicationStateName,@"applicationStateRaw":@(applicationState),
+        @"bounds":QPRectState(self.webView.bounds),
+        @"scrollViewBounds":QPRectState(self.webView.scrollView.bounds),@"zoomScale":@(self.webView.scrollView.zoomScale),
+        @"cssSize":QPSizeState(self.cssSize),@"crop":QPRectState(self.crop),
+        @"hidden":@(self.webView.hidden),@"inWindow":@(window!=nil),@"windowHidden":window?@(window.hidden):(id)NSNull.null,
+        @"paused":@(self.paused)
+    };
     if (![status isEqual:self.lastProcessPolicy]) {
         self.lastProcessPolicy=status;
         if (self.statusChanged) self.statusChanged(status);

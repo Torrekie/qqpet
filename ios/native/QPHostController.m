@@ -1,7 +1,7 @@
 #import "QPHostController.h"
 #import "QPEventBridge.h"
 #import "QPSystemTextInput.h"
-#import "QPMediaPolicy.h"
+#import "QPAudioOutput.h"
 #import "QPMemoryPolicy.h"
 #import <math.h>
 
@@ -62,7 +62,8 @@ static CGFloat QPOrientationAngle(UIInterfaceOrientation orientation) {
 @property(nonatomic, strong) NSMutableArray *flushWaiters;
 @property(nonatomic, strong) NSMutableSet<NSString *> *deferredManagerRequests;
 @property(nonatomic, strong) QPMemoryPolicy *processPolicy;
-@property(nonatomic, copy) NSString *mediaAudioProcess;
+@property(nonatomic, strong) QPAudioOutput *audioOutput;
+@property(nonatomic) NSUInteger audioGeneration;
 @property(nonatomic, copy) NSDictionary *lastProcessPolicy;
 @property(nonatomic, copy) NSString *currentPage;
 @property(nonatomic, strong) QPSystemTextInput *textInput;
@@ -107,15 +108,21 @@ static CGFloat QPOrientationAngle(UIInterfaceOrientation orientation) {
     [self.cropView addSubview:self.viewport];
     WKWebViewConfiguration *config=[WKWebViewConfiguration new];
     config.allowsInlineMediaPlayback=YES; config.mediaTypesRequiringUserActionForPlayback=WKAudiovisualMediaTypeNone;
-    self.mediaAudioProcess=QPConfigureMediaConfiguration(config);
+    self.audioOutput=[QPAudioOutput new];
+    [self.audioOutput setHostPaused:self.paused];
     // Apply before Ruffle in every document, including its separate SWF frames.
     NSURL *audioPolicyURL=[NSBundle.mainBundle URLForResource:@"audio-policy" withExtension:@"js"];
     NSError *audioPolicyError=nil;
     NSString *audioPolicy=audioPolicyURL?[NSString stringWithContentsOfURL:audioPolicyURL encoding:NSUTF8StringEncoding error:&audioPolicyError]:nil;
     if (audioPolicy) {
-        NSString *source=[NSString stringWithFormat:@"window.__qqpetRequireNativeAudioPolicy=%@;\nwindow.__qqpetLocalAudioOutput=%@;\n%@",NSProcessInfo.processInfo.operatingSystemVersion.majorVersion==15?@"true":@"false",[self.mediaAudioProcess isEqual:@"webcontent"]?@"true":@"false",audioPolicy];
-        [config.userContentController addUserScript:[[WKUserScript alloc] initWithSource:source injectionTime:WKUserScriptInjectionTimeAtDocumentStart forMainFrameOnly:NO]];
-    } else NSLog(@"QQPet audio policy unavailable: %@",audioPolicyError.localizedDescription);
+        [config.userContentController addUserScript:[[WKUserScript alloc] initWithSource:audioPolicy injectionTime:WKUserScriptInjectionTimeAtDocumentStart forMainFrameOnly:NO]];
+    } else {
+        NSLog(@"QQPet audio policy unavailable: %@",audioPolicyError.localizedDescription);
+        // A missing resource must not fall back to WebKit's interrupting output.
+        NSString *blocked=@"window.__qqpetRespectSystemAudio=true;window.__qqpetAudioPolicyState='script-unavailable';window.AudioContext=window.webkitAudioContext=function(){throw new Error('QQPet native audio script unavailable')};";
+        [config.userContentController addUserScript:[[WKUserScript alloc] initWithSource:blocked injectionTime:WKUserScriptInjectionTimeAtDocumentStart forMainFrameOnly:NO]];
+    }
+    [config.userContentController addScriptMessageHandler:self name:@"qqpetAudio"];
     [config.userContentController addScriptMessageHandler:self name:@"qqpet"];
     self.webView=[[WKWebView alloc] initWithFrame:self.viewport.bounds configuration:config];
     self.webView.navigationDelegate=self; self.webView.opaque=NO; self.webView.backgroundColor=UIColor.clearColor;
@@ -152,6 +159,7 @@ static CGFloat QPOrientationAngle(UIInterfaceOrientation orientation) {
 - (void)setPaused:(BOOL)paused {
     BOOL changed=_paused!=paused;
     _paused=paused;
+    [self.audioOutput setHostPaused:paused];
     if (paused) { QPResetCapturedTouches(); [self.pointerIDs removeAllObjects]; }
     [self emit:@"paused" value:@(paused)];
     if (changed) [self emit:@"presence" value:@(paused)];
@@ -159,9 +167,9 @@ static CGFloat QPOrientationAngle(UIInterfaceOrientation orientation) {
     [self applyGeometry];
 }
 - (void)updateProcessPolicy {
-    if (!self.processPolicy) return;
     NSDictionary *policy=[self.processPolicy updateWithWebView:self.webView active:!self.paused&&!self.invalidated];
-    NSDictionary *status=@{@"mediaAudioProcess":self.mediaAudioProcess ?: @"system-default",@"processPolicy":policy};
+    NSMutableDictionary *status=[@{@"mediaAudioProcess":@"native-audioqueue",@"nativeAudio":self.audioOutput.status ?: @{}} mutableCopy];
+    if (policy) status[@"processPolicy"]=policy;
     if (![status isEqual:self.lastProcessPolicy]) {
         self.lastProcessPolicy=status;
         if (self.statusChanged) self.statusChanged(status);
@@ -243,6 +251,23 @@ static CGFloat QPOrientationAngle(UIInterfaceOrientation orientation) {
     if (reply) reply(value,error);
 }
 - (void)userContentController:(WKUserContentController *)controller didReceiveScriptMessage:(WKScriptMessage *)message {
+    if ([message.name isEqual:@"qqpetAudio"]) {
+        if (self.invalidated || ![message.frameInfo.securityOrigin.protocol isEqual:@"http"] || ![message.frameInfo.securityOrigin.host isEqual:@"127.0.0.1"] || message.frameInfo.securityOrigin.port!=self.server.port || ![message.body isKindOfClass:NSDictionary.class]) return;
+        // Audio also runs in local game iframes. Replies belong to the exact
+        // originating frame and document, never to the top-level renderer.
+        WKFrameInfo *frame=message.frameInfo;
+        NSUInteger generation=self.audioGeneration;
+        __weak QPHostController *weakSelf=self;
+        [self.audioOutput handleMessage:message.body reply:^(NSDictionary *event) {
+            dispatch_async(dispatch_get_main_queue(),^{
+                QPHostController *host=weakSelf;
+                if (!host || host.invalidated || host.audioGeneration!=generation) return;
+                NSString *script=[NSString stringWithFormat:@"window.__qqpetNativeAudioReceive&&window.__qqpetNativeAudioReceive(%@)",QPJSON(event)];
+                [host.webView evaluateJavaScript:script inFrame:frame inContentWorld:WKContentWorld.pageWorld completionHandler:nil];
+            });
+        }];
+        return;
+    }
     if (!message.frameInfo.isMainFrame || ![message.frameInfo.securityOrigin.host isEqual:@"127.0.0.1"] || message.frameInfo.securityOrigin.port!=self.server.port || ![message.body isKindOfClass:NSDictionary.class]) return;
     NSDictionary *body=message.body; NSNumber *request=body[@"id"]; NSString *op=body[@"op"], *page=body[@"page"]; NSDictionary *args=body[@"args"];
     if (![request isKindOfClass:NSNumber.class] || ![op isKindOfClass:NSString.class] || ![page isKindOfClass:NSString.class] || !page.length || ![args isKindOfClass:NSDictionary.class]) return;
@@ -383,6 +408,7 @@ static CGFloat QPOrientationAngle(UIInterfaceOrientation orientation) {
     if (finish) finish(); for (void (^completion)(void) in waiting) completion();
 }
 - (void)webView:(WKWebView *)webView didStartProvisionalNavigation:(WKNavigation *)navigation {
+    self.audioGeneration++; [self.audioOutput reset];
     [self cancelTextInput:nil page:self.currentPage];
     if (self.currentPage && self.cancelManagerOperation) self.cancelManagerOperation(nil,self.currentPage);
     self.currentPage=nil; for (NSURLSessionTask *task in self.network.allValues) [task cancel]; [self.network removeAllObjects];
@@ -402,6 +428,7 @@ static CGFloat QPOrientationAngle(UIInterfaceOrientation orientation) {
     [self webContentTerminated:webView reason:reason];
 }
 - (void)webContentTerminated:(WKWebView *)webView reason:(NSInteger)reason {
+    self.audioGeneration++; [self.audioOutput reset];
     [self cancelTextInput:nil page:self.currentPage];
     [self.processPolicy updateWithWebView:webView active:NO];
     NSArray *reasons=@[@"memory-limit",@"cpu-limit",@"client-request",@"crash"];
@@ -416,6 +443,8 @@ static CGFloat QPOrientationAngle(UIInterfaceOrientation orientation) {
     [self cancelTextInput:nil page:nil];
     self.invalidated=YES; [self.session invalidateAndCancel]; [self.network removeAllObjects]; [self.webView stopLoading];
     [self.processPolicy invalidate];
+    self.audioGeneration++; [self.audioOutput invalidate];
+    [self.webView.configuration.userContentController removeScriptMessageHandlerForName:@"qqpetAudio"];
     [self.webView.configuration.userContentController removeScriptMessageHandlerForName:@"qqpet"];
     [self.pointerIDs removeAllObjects]; self.flushCompletion=nil; [self.flushWaiters removeAllObjects]; [self.deferredManagerRequests removeAllObjects];
 }

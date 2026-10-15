@@ -125,14 +125,11 @@ export const ACTIONS: Record<Sex, ActionData> = {
       Adult: { ...walks(3), drag: DRAG([1, 2, 3]), hideright: ['Hide_right1', 'motion/hide_right130906'], ...looks() },
     },
     extraPlay: {
-      Egg: [{ clip: 'motion/003', single: true }, { clip: 'turn/ctoe' }],
+      // Imported Egg extras draw adult GG and have no age-dependent initialization.
       Adult: [{ clip: 'motion/005', single: true }, { clip: 'motion/009', single: true }, { clip: 'motion/017' }, { clip: 'motion/021' }],
     },
     rest: {
-      // ctoj (21 frames) lies down; frozen one frame short of the end so the machine holds it.
-      Egg: { lying: 'turn/ctoj', freeze: 19 },
-      // jtoe (20 frames) gets up from lying; its first frame is the lying pose.
-      Kid: { lying: 'turn/jtoe', freeze: 1, up: 'turn/jtoe' },
+      // The imported Egg/Kid turn clips also draw adult GG.
       Adult: { down: 'Etoj', lying: 'prostrate/Stand', up: 'Jtoc' },
     },
   },

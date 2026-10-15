@@ -71,10 +71,10 @@ test('extra plays exist, take one slot each, and only single-frame ones carry ho
       for (const e of list) assert.ok(has(`pet/Action/${sex}/${stage}/${e.clip}.swf`), e.clip)
     }
   }
-  // Egg GG: 47 numbered + 2 extras; the last two slots are the extras.
-  assert.equal(extraPlay('GG', 'Egg', 47, 0), null)
-  assert.equal(extraPlay('GG', 'Egg', 47, 47 / 49)?.clip, 'motion/003')
-  assert.equal(extraPlay('GG', 'Egg', 47, 0.9999)?.clip, 'turn/ctoe')
+  // The imported Egg extras contain adult artwork, so every roll keeps a numbered play.
+  for (const roll of [0, 0.5, 47 / 49, 0.9999]) assert.equal(extraPlay('GG', 'Egg', 47, roll), null)
+  assert.equal(extraPlay('GG', 'Adult', 127, (127 + 0.25) / 131)?.clip, 'motion/005')
+  assert.equal(extraPlay('GG', 'Adult', 127, 0.9999)?.clip, 'motion/021')
   assert.equal(extraPlay('MM', 'Egg', 29, 0.9999), null)
   for (let i = 0; i < 400; i++) {
     const t = route('GG', 'Adult', 'play', 'happy')

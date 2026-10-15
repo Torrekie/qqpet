@@ -6,11 +6,11 @@ import { BUBBLES, VISIT_DIR, VISIT_STAGE, visitBox, visitSteps } from '../../src
 
 const has = (url) => existsSync(new URL(`../../resources/${url}`, import.meta.url))
 
-test('rest plans point at existing clips; MM rests only as an adult', () => {
+test('rest plans point at existing adult clips and exclude juvenile routes to adult artwork', () => {
   for (const sex of ['GG', 'MM']) {
     for (const stage of ['Egg', 'Kid', 'Adult']) {
       const p = restPlan(sex, stage)
-      if (sex === 'MM' && stage !== 'Adult') {
+      if (stage !== 'Adult') {
         assert.equal(p, null)
         continue
       }

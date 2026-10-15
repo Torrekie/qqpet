@@ -105,6 +105,24 @@ test('hide variants resolve to existing clips', () => {
   }
 })
 
+test('younger peeking always keeps its stage-specific artwork', () => {
+  const random = Math.random
+  try {
+    for (const roll of [0, 0.5, 0.999999]) {
+      Math.random = () => roll
+      for (const sex of ['GG', 'MM']) {
+        for (const stage of ['Egg', 'Kid']) {
+          for (const side of ['left', 'right']) {
+            const target = route(sex, stage, `hide${side}`, 'happy')
+            assert.equal(target.url, `pet/Action/${sex}/${stage}/Hide_${side}1.swf`)
+            assert.ok(has(target.url), target.url)
+          }
+        }
+      }
+    }
+  } finally { Math.random = random }
+})
+
 test('small-game icons exist', async () => {
   const src = (await import('node:fs')).readFileSync(new URL('../../src/renderer/ui/smallgame.ts', import.meta.url), 'utf8')
   for (const [, icon] of src.matchAll(/icon: '([a-z]+)'/g)) assert.ok(has(`pet/quickBar/TickleSystem/${icon}00.png`), icon)

@@ -110,8 +110,7 @@ export const ACTIONS: Record<Sex, ActionData> = {
     variants: {
       Egg: {
         ...walks(2),
-        hideleft: ['Hide_left1', 'motion/hide_left130906'],
-        hideright: ['Hide_right1', 'motion/hide_right130906'],
+        // Imported motion/hide clips draw adult GG; common() keeps this stage's peeks.
         look_left: ['walk/lplay'],
         look_right: ['walk/rplay'],
       },

@@ -52,6 +52,96 @@ function movieFixture() {
   }
 }
 
+function listenerFixture() {
+  class Target {
+    entries = []
+    addEventListener(type, listener, options) {
+      const capture = typeof options === 'boolean' ? options : Boolean(options?.capture)
+      if (!this.entries.some(entry => entry.type === type && entry.listener === listener && entry.capture === capture))
+        this.entries.push({ type, listener, capture })
+    }
+    removeEventListener(type, listener, options) {
+      const capture = typeof options === 'boolean' ? options : Boolean(options?.capture)
+      this.entries = this.entries.filter(entry => entry.type !== type || entry.listener !== listener || entry.capture !== capture)
+    }
+  }
+  const document = new Target(), view = new Target(), root = new Target()
+  document.documentElement = root
+  document.defaultView = view
+  // Restore an existing own descriptor as well as inherited native methods.
+  Object.defineProperty(root, 'addEventListener', { value: root.addEventListener, configurable: true, writable: false, enumerable: true })
+  const descriptors = [document, root, view].map(target => Object.getOwnPropertyDescriptor(target, 'addEventListener'))
+  let failCreate = false, failAppend = false, duringCreate = () => {}
+  const elements = []
+  view.RufflePlayer = { newest: () => ({ createPlayer() {
+    const listener = () => {}
+    document.addEventListener('visibilitychange', listener)
+    root.addEventListener('pointerdown', listener)
+    root.addEventListener('pointerdown', listener, { capture: true })
+    view.addEventListener('resize', { handleEvent() {} })
+    duringCreate()
+    if (failCreate) throw new Error('Ruffle constructor failed')
+    const el = { style: {}, dataset: {}, shadowRoot: null, ownerDocument: document, isConnected: false,
+      remove() { this.isConnected = false } }
+    elements.push(el)
+    return el
+  } }) }
+  const parent = { ownerDocument: document, appendChild(el) {
+    el.isConnected = true
+    if (failAppend) throw new Error('Ruffle append failed')
+  } }
+  const context = {
+    window: { dispatchEvent() {} }, document,
+    MutationObserver: class { observe() {} },
+    location: { href: 'http://example.test/index.html' }, URL, performance, setTimeout, clearTimeout,
+    readPlayerPanic, isFatalRufflePanic,
+  }
+  const source = playerSource.replace(/^import .*$/gm, '').replace(/export (?=class|function)/g, '')
+  runInNewContext(stripTypeScriptTypes(source) + '\nthis.SwfPlayer=SwfPlayer', context)
+  return { targets: [document, root, view], descriptors, elements,
+    create: () => new context.SwfPlayer(parent),
+    failCreate: () => { failCreate = true }, failAppend: () => { failAppend = true },
+    duringCreate: callback => { duringCreate = callback },
+  }
+}
+
+test('destroy removes only its constructor global listeners and restores target descriptors immediately', () => {
+  const f = listenerFixture()
+  const first = f.create(), sibling = f.create()
+  assert.deepEqual(f.targets.map(target => target.entries.length), [2, 4, 2])
+  for (let index = 0; index < f.targets.length; index++)
+    assert.deepEqual(Object.getOwnPropertyDescriptor(f.targets[index], 'addEventListener'), f.descriptors[index])
+  first.destroy()
+  assert.deepEqual(f.targets.map(target => target.entries.length), [1, 2, 1])
+  first.destroy()
+  assert.deepEqual(f.targets.map(target => target.entries.length), [1, 2, 1], 'cleanup is idempotent and leaves the sibling alive')
+  sibling.destroy()
+  assert.deepEqual(f.targets.map(target => target.entries.length), [0, 0, 0])
+})
+
+test('constructor and append failures clean global registrations and restore descriptors', () => {
+  for (const failure of ['failCreate', 'failAppend']) {
+    const f = listenerFixture()
+    f[failure]()
+    assert.throws(() => f.create(), /Ruffle (constructor|append) failed/)
+    assert.deepEqual(f.targets.map(target => target.entries.length), [0, 0, 0])
+    assert.ok(f.elements.every(element => !element.isConnected))
+    for (let index = 0; index < f.targets.length; index++)
+      assert.deepEqual(Object.getOwnPropertyDescriptor(f.targets[index], 'addEventListener'), f.descriptors[index])
+  }
+})
+
+test('nested construction keeps each player global listener ownership separate', () => {
+  const f = listenerFixture()
+  let sibling
+  f.duringCreate(() => { f.duringCreate(() => {}); sibling = f.create() })
+  const first = f.create()
+  first.destroy()
+  assert.deepEqual(f.targets.map(target => target.entries.length), [1, 2, 1])
+  sibling.destroy()
+  assert.deepEqual(f.targets.map(target => target.entries.length), [0, 0, 0])
+})
+
 test('a failed load publishes its original panic before removing the shadow DOM', async () => {
   const f = movieFixture()
   const original = details('panicked at core/src/player.rs: first failure')

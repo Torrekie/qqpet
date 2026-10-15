@@ -21,6 +21,59 @@ const CONFIG = {
   logLevel: 'error',
 }
 
+interface GlobalListener {
+  target: EventTarget
+  type: string
+  listener: EventListenerOrEventListenerObject
+  capture: boolean
+  remove: EventTarget['removeEventListener']
+}
+let constructingListeners: GlobalListener[] | null = null
+
+/** Ruffle 0.6's constructor leaves document listeners behind when its element disconnects. */
+function createRuffleElement(parent: HTMLElement): { el: RufflePlayerElement; cleanup: () => void } {
+  const document = parent.ownerDocument
+  const listeners: GlobalListener[] = []
+  const restore: (() => void)[] = []
+  const previous = constructingListeners
+  const cleanup = (): void => {
+    for (const entry of listeners.splice(0)) entry.remove.call(entry.target, entry.type, entry.listener, entry.capture)
+  }
+  let el: RufflePlayerElement | undefined
+  constructingListeners = listeners
+  try {
+    for (const target of new Set<EventTarget | null>([document, document.documentElement, document.defaultView])) {
+      if (!target || typeof target.addEventListener !== 'function') continue
+      const descriptor = Object.getOwnPropertyDescriptor(target, 'addEventListener')
+      const add = target.addEventListener
+      const remove = target.removeEventListener
+      const wrapped: EventTarget['addEventListener'] = function (this: EventTarget, type, listener, options) {
+        add.call(this, type, listener, options)
+        if (this === target && listener && constructingListeners === listeners)
+          listeners.push({ target, type, listener, capture: typeof options === 'boolean' ? options : Boolean(options?.capture), remove })
+      }
+      Object.defineProperty(target, 'addEventListener', { configurable: true, writable: true, value: wrapped })
+      restore.push(() => {
+        if (descriptor) Object.defineProperty(target, 'addEventListener', descriptor)
+        else Reflect.deleteProperty(target, 'addEventListener')
+      })
+    }
+    el = document.defaultView!.RufflePlayer.newest().createPlayer()
+    el.style.width = '100%'
+    el.style.height = '100%'
+    parent.appendChild(el)
+    safari14Styles(el)
+    return { el, cleanup }
+  } catch (error) {
+    cleanup()
+    el?.remove()
+    throw error
+  } finally {
+    for (const undo of restore.reverse()) undo()
+    constructingListeners = previous
+  }
+}
+
 const players = new Set<SwfPlayer>()
 const LOAD_MS = 30_000
 const CALLBACK_MS = 10_000
@@ -98,36 +151,40 @@ export class SwfPlayer {
   private loading = false
   private pausedAt: number | null = null
   private pending = new Set<(error: Error) => void>()
+  private globalCleanup = (): void => {}
   private keyboardCleanup = (): void => {}
   private panicObserver: MutationObserver | null = null
   private reportedPanic = false
 
   /** The SWF's ExternalInterface calls go to the globals of the window that owns `parent`. */
   constructor(parent: HTMLElement) {
-    this.el = parent.ownerDocument.defaultView!.RufflePlayer.newest().createPlayer()
-    this.el.style.width = '100%'
-    this.el.style.height = '100%'
-    parent.appendChild(this.el)
-    safari14Styles(this.el)
-    players.add(this)
-    if (this.el.shadowRoot) {
-      this.panicObserver = new MutationObserver(() => this.publishPanic())
-      this.panicObserver.observe(this.el.shadowRoot, { childList: true, subtree: true, characterData: true })
-    }
-    // Ruffle types into text fields from a hidden <input> it empties on every input event, which breaks IME
-    // composition (Chinese). Keep the composing keystrokes from it and hand it the committed text at once.
-    const keyboard = this.el.shadowRoot?.getElementById('virtual-keyboard')
-    const composing = (e: Event): void => {
-      if ((e as InputEvent).isComposing) e.stopImmediatePropagation()
-    }
-    if (keyboard) {
-      const committed = (): void => { keyboard.dispatchEvent(new Event('input')) }
-      for (const type of ['input', 'keydown', 'keyup']) keyboard.addEventListener(type, composing, true)
-      keyboard.addEventListener('compositionend', committed)
-      this.keyboardCleanup = () => {
-        for (const type of ['input', 'keydown', 'keyup']) keyboard.removeEventListener(type, composing, true)
-        keyboard.removeEventListener('compositionend', committed)
+    const created = createRuffleElement(parent)
+    this.el = created.el
+    this.globalCleanup = created.cleanup
+    try {
+      players.add(this)
+      if (this.el.shadowRoot) {
+        this.panicObserver = new MutationObserver(() => this.publishPanic())
+        this.panicObserver.observe(this.el.shadowRoot, { childList: true, subtree: true, characterData: true })
       }
+      // Ruffle types into text fields from a hidden <input> it empties on every input event, which breaks IME
+      // composition (Chinese). Keep the composing keystrokes from it and hand it the committed text at once.
+      const keyboard = this.el.shadowRoot?.getElementById('virtual-keyboard')
+      const composing = (e: Event): void => {
+        if ((e as InputEvent).isComposing) e.stopImmediatePropagation()
+      }
+      if (keyboard) {
+        const committed = (): void => { keyboard.dispatchEvent(new Event('input')) }
+        for (const type of ['input', 'keydown', 'keyup']) keyboard.addEventListener(type, composing, true)
+        keyboard.addEventListener('compositionend', committed)
+        this.keyboardCleanup = () => {
+          for (const type of ['input', 'keydown', 'keyup']) keyboard.removeEventListener(type, composing, true)
+          keyboard.removeEventListener('compositionend', committed)
+        }
+      }
+    } catch (error) {
+      this.destroy()
+      throw error
     }
   }
 
@@ -306,6 +363,7 @@ export class SwfPlayer {
     this.publishPanic()
     this.destroyed = true
     this.panicObserver?.disconnect()
+    this.globalCleanup()
     ++this.revision
     this.cancelPending('SWF player was destroyed')
     this.keyboardCleanup()
